@@ -107,23 +107,17 @@ A real world-model backend should treat `xr_hand_joint_poses` as the authoritati
 
 ### Request Schema
 
-Current live request schema:
+Current live request schema, shown as **JSONC-style pseudocode** so the shape of every array is explicit:
 
-Important:
-
-- the numeric values shown below are **illustrative example values only**
-- they are **not** copied from a real live packet
-- they are chosen to show the JSON shape clearly
-
-```json
+```jsonc
 {
-  "source": "xr_hand_joint_poses",
-  "hand_side": "right",
-  "timestamp_s": 1774005000.123,
-  "keypoints_xyz": [[0.10, 1.20, 0.30], [0.11, 1.21, 0.31]],
-  "is_relative": false,
-  "world_frame": "unity_xr_world",
-  "joint_order": [
+  "source": "xr_hand_joint_poses",                    // string
+  "hand_side": "right",                              // string: "left" | "right"
+  "timestamp_s": "<float seconds>",                  // scalar float
+  "keypoints_xyz": "<float[26][3]>",                 // 26 joints, each [x, y, z]
+  "is_relative": false,                               // bool
+  "world_frame": "unity_xr_world",                   // string
+  "joint_order": [                                    // string[26]
     "wrist",
     "palm",
     "thumb_metacarpal",
@@ -151,50 +145,56 @@ Important:
     "little_distal",
     "little_tip"
   ],
-  "joint_transforms_world": {
-    "wrist": [[1, 0, 0, 0.10], [0, 1, 0, 1.20], [0, 0, 1, 0.30], [0, 0, 0, 1]],
-    "palm": [[1, 0, 0, 0.11], [0, 1, 0, 1.21], [0, 0, 1, 0.31], [0, 0, 0, 1]],
-    "thumb_metacarpal": [[...], [...], [...], [...]],
-    "thumb_proximal": [[...], [...], [...], [...]],
-    "thumb_distal": [[...], [...], [...], [...]],
-    "thumb_tip": [[...], [...], [...], [...]],
-    "index_metacarpal": [[...], [...], [...], [...]],
-    "index_proximal": [[...], [...], [...], [...]],
-    "index_intermediate": [[...], [...], [...], [...]],
-    "index_distal": [[...], [...], [...], [...]],
-    "index_tip": [[...], [...], [...], [...]],
-    "middle_metacarpal": [[...], [...], [...], [...]],
-    "middle_proximal": [[...], [...], [...], [...]],
-    "middle_intermediate": [[...], [...], [...], [...]],
-    "middle_distal": [[...], [...], [...], [...]],
-    "middle_tip": [[...], [...], [...], [...]],
-    "ring_metacarpal": [[...], [...], [...], [...]],
-    "ring_proximal": [[...], [...], [...], [...]],
-    "ring_intermediate": [[...], [...], [...], [...]],
-    "ring_distal": [[...], [...], [...], [...]],
-    "ring_tip": [[...], [...], [...], [...]],
-    "little_metacarpal": [[...], [...], [...], [...]],
-    "little_proximal": [[...], [...], [...], [...]],
-    "little_intermediate": [[...], [...], [...], [...]],
-    "little_distal": [[...], [...], [...], [...]],
-    "little_tip": [[...], [...], [...], [...]]
+  "joint_transforms_world": {                         // object with 26 keys, each value float[4][4]
+    "wrist": [
+      ["<r00>", "<r01>", "<r02>", "<tx>"],
+      ["<r10>", "<r11>", "<r12>", "<ty>"],
+      ["<r20>", "<r21>", "<r22>", "<tz>"],
+      [0.0, 0.0, 0.0, 1.0]
+    ],
+    "palm": "<float[4][4]>",
+    "thumb_metacarpal": "<float[4][4]>",
+    "thumb_proximal": "<float[4][4]>",
+    "thumb_distal": "<float[4][4]>",
+    "thumb_tip": "<float[4][4]>",
+    "index_metacarpal": "<float[4][4]>",
+    "index_proximal": "<float[4][4]>",
+    "index_intermediate": "<float[4][4]>",
+    "index_distal": "<float[4][4]>",
+    "index_tip": "<float[4][4]>",
+    "middle_metacarpal": "<float[4][4]>",
+    "middle_proximal": "<float[4][4]>",
+    "middle_intermediate": "<float[4][4]>",
+    "middle_distal": "<float[4][4]>",
+    "middle_tip": "<float[4][4]>",
+    "ring_metacarpal": "<float[4][4]>",
+    "ring_proximal": "<float[4][4]>",
+    "ring_intermediate": "<float[4][4]>",
+    "ring_distal": "<float[4][4]>",
+    "ring_tip": "<float[4][4]>",
+    "little_metacarpal": "<float[4][4]>",
+    "little_proximal": "<float[4][4]>",
+    "little_intermediate": "<float[4][4]>",
+    "little_distal": "<float[4][4]>",
+    "little_tip": "<float[4][4]>"
   },
-  "joint_positions_rad": [
-    -0.23, 0.14, 0.00, 0.35,
-    -0.09, 0.28, 0.01, 0.32,
-    0.02, 0.31, 0.02, 0.35,
-    0.10, 0.61, 1.24, 0.02
-  ]
+  "joint_positions_rad": "<float[16]>"              // optional
 }
 ```
 
-Notes:
+Array shapes at a glance:
 
-- The example truncates arrays for readability.
-- The numeric matrix entries shown in the example are illustrative, not recorded runtime values.
-- In real traffic, `keypoints_xyz` has `26 x 3` values.
-- In real traffic, `joint_transforms_world` has 26 entries, one per joint.
-- The example above now shows the full set of joint keys, but uses `...` for most matrix values to keep the schema readable.
+- `keypoints_xyz`: `float[26][3]`
+- `joint_order`: `string[26]`
+- `joint_transforms_world[joint_name]`: `float[4][4]`
+- `joint_transforms_world`: 26 named matrices total
+- `joint_positions_rad`: `float[16]` when present
+
+Important:
+
+- placeholder tokens like `<r00>` or `<tx>` are not literal payload values
+- they are symbolic names used only to show matrix structure
+- the only fixed numeric row in a real transform is the last row: `[0.0, 0.0, 0.0, 1.0]`
 
 ## Field-by-Field Definitions
 
