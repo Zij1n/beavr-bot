@@ -147,7 +147,31 @@ Current live request schema:
   ],
   "joint_transforms_world": {
     "wrist": [[1, 0, 0, 0.10], [0, 1, 0, 1.20], [0, 0, 1, 0.30], [0, 0, 0, 1]],
-    "palm": [[1, 0, 0, 0.11], [0, 1, 0, 1.21], [0, 0, 1, 0.31], [0, 0, 0, 1]]
+    "palm": [[1, 0, 0, 0.11], [0, 1, 0, 1.21], [0, 0, 1, 0.31], [0, 0, 0, 1]],
+    "thumb_metacarpal": [[...], [...], [...], [...]],
+    "thumb_proximal": [[...], [...], [...], [...]],
+    "thumb_distal": [[...], [...], [...], [...]],
+    "thumb_tip": [[...], [...], [...], [...]],
+    "index_metacarpal": [[...], [...], [...], [...]],
+    "index_proximal": [[...], [...], [...], [...]],
+    "index_intermediate": [[...], [...], [...], [...]],
+    "index_distal": [[...], [...], [...], [...]],
+    "index_tip": [[...], [...], [...], [...]],
+    "middle_metacarpal": [[...], [...], [...], [...]],
+    "middle_proximal": [[...], [...], [...], [...]],
+    "middle_intermediate": [[...], [...], [...], [...]],
+    "middle_distal": [[...], [...], [...], [...]],
+    "middle_tip": [[...], [...], [...], [...]],
+    "ring_metacarpal": [[...], [...], [...], [...]],
+    "ring_proximal": [[...], [...], [...], [...]],
+    "ring_intermediate": [[...], [...], [...], [...]],
+    "ring_distal": [[...], [...], [...], [...]],
+    "ring_tip": [[...], [...], [...], [...]],
+    "little_metacarpal": [[...], [...], [...], [...]],
+    "little_proximal": [[...], [...], [...], [...]],
+    "little_intermediate": [[...], [...], [...], [...]],
+    "little_distal": [[...], [...], [...], [...]],
+    "little_tip": [[...], [...], [...], [...]]
   },
   "joint_positions_rad": [
     -0.23, 0.14, 0.00, 0.35,
@@ -163,6 +187,7 @@ Notes:
 - The example truncates arrays for readability.
 - In real traffic, `keypoints_xyz` has `26 x 3` values.
 - In real traffic, `joint_transforms_world` has 26 entries, one per joint.
+- The example above now shows the full set of joint keys, but uses `...` for most matrix values to keep the schema readable.
 
 ## Field-by-Field Definitions
 
