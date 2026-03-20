@@ -91,6 +91,9 @@ class RemoteEgoDexWMBackend:
             "hand_side": hand_side,
             "timestamp_s": payload.get("timestamp_s"),
             "has_keypoints": "keypoints_xyz" in payload,
+            "has_joint_transforms_world": "joint_transforms_world" in payload,
+            "world_frame": payload.get("world_frame"),
+            "is_relative": payload.get("is_relative"),
             "action_dof": len(joint_positions) if isinstance(joint_positions, list) else None,
         }
 
@@ -117,17 +120,35 @@ class RemoteEgoDexWMBackend:
         self._latest_state = dict(self._latest_state)
         self._latest_state[f"{action.hand_side}_joint_state"] = joint_positions
 
-    def on_keypoints(self, side: str, keypoints_xyz: np.ndarray, timestamp_s: float) -> None:
+    def on_keypoints(
+        self,
+        side: str,
+        keypoints_xyz: np.ndarray,
+        timestamp_s: float,
+        *,
+        is_relative: bool,
+        world_frame: Optional[str],
+        joint_order: Optional[Any],
+        joint_transforms_world: Optional[Any],
+    ) -> None:
         keypoints = np.asarray(keypoints_xyz, dtype=np.float32)
         if keypoints.ndim != 2 or keypoints.shape[1] != 3:
             return
 
         payload: dict[str, Any] = {
-            "source": "vr_keypoints",
+            "source": "xr_hand_joint_poses" if joint_transforms_world is not None else "vr_keypoints",
             "hand_side": side,
             "timestamp_s": float(timestamp_s),
             "keypoints_xyz": keypoints.tolist(),
+            "is_relative": bool(is_relative),
         }
+        if world_frame:
+            payload["world_frame"] = str(world_frame)
+        if joint_order is not None:
+            payload["joint_order"] = list(joint_order)
+        payload["joint_transforms_world"] = (
+            dict(joint_transforms_world) if joint_transforms_world is not None else None
+        )
         latest_action = self._last_action_by_side.get(side)
         if latest_action is not None:
             payload["joint_positions_rad"] = latest_action["joint_positions_rad"]

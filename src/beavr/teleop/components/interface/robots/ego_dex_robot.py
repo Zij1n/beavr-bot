@@ -101,6 +101,7 @@ class EgoDexSessionLogger:
                 "observation_transport": "wm_client_jpg",
                 "action_schema": "joint_positions_rad[16]",
                 "keypoint_schema": f"{robots.OCULUS_NUM_KEYPOINTS}x3",
+                "pose_schema": f"{robots.OCULUS_NUM_KEYPOINTS}x4x4 world-frame hand poses when detector mode=absolute",
             }
         )
 
@@ -149,6 +150,7 @@ class EgoDexRobot(Component):
         self._action_subscribers: Dict[str, ZMQSubscriber] = {}
         self._keypoint_subscribers: Dict[str, ZMQSubscriber] = {}
         self._joint_state_ports: Dict[str, int] = {}
+        self._last_keypoint_keys: Dict[str, Optional[Tuple[Any, ...]]] = {}
 
         if enable_right:
             self._enabled_sides.append(robots.RIGHT)
@@ -164,6 +166,7 @@ class EgoDexRobot(Component):
                 message_type=InputFrame,
             )
             self._joint_state_ports[robots.RIGHT] = right_joint_state_publish_port
+            self._last_keypoint_keys[robots.RIGHT] = None
 
         if enable_left:
             self._enabled_sides.append(robots.LEFT)
@@ -179,6 +182,7 @@ class EgoDexRobot(Component):
                 message_type=InputFrame,
             )
             self._joint_state_ports[robots.LEFT] = left_joint_state_publish_port
+            self._last_keypoint_keys[robots.LEFT] = None
 
         self._action_decoder = ActionDecoder(self._enabled_sides)
         self._logger = EgoDexSessionLogger(log_dir=log_dir, log_prefix=log_prefix)
@@ -242,12 +246,25 @@ class EgoDexRobot(Component):
             if not isinstance(msg, InputFrame):
                 continue
 
+            dedupe_key = (msg.timestamp_s, bool(msg.is_relative), msg.world_frame)
+            if self._last_keypoint_keys.get(side) == dedupe_key:
+                continue
+            self._last_keypoint_keys[side] = dedupe_key
+
             keypoints = self._reshape_keypoints(msg.keypoints)
             if keypoints is None:
                 continue
 
             try:
-                self._backend.on_keypoints(side, keypoints, msg.timestamp_s)
+                self._backend.on_keypoints(
+                    side,
+                    keypoints,
+                    msg.timestamp_s,
+                    is_relative=bool(msg.is_relative),
+                    world_frame=msg.world_frame,
+                    joint_order=msg.joint_order,
+                    joint_transforms_world=msg.joint_transforms_world,
+                )
             except Exception:
                 logger.exception("Backend on_keypoints failed for side=%s", side)
 

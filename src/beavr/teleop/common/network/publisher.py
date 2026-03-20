@@ -186,7 +186,7 @@ class ZMQCompressedImageTransmitter(BasePublisher):
             ConnectionError: If socket operation fails
             SerializationError: If compression fails
         """
-        _, buffer = cv2.imencode(".jpg", rgb_image, [int(cv2.IMWRITE_WEBP_QUALITY), 10])
+        _, buffer = cv2.imencode(".jpg", rgb_image, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         self._socket.send_multipart([b"image", np.array(buffer).tobytes()], zmq.NOBLOCK)
 
 

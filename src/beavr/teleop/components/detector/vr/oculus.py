@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import Optional, Union
+from typing import Optional, Sequence, Tuple, Union
 
 import zmq
 
@@ -16,6 +16,37 @@ from beavr.teleop.components.detector.detector_types import (
 from beavr.teleop.configs.constants import network, robots
 
 logger = logging.getLogger(__name__)
+
+
+UNITY_XR_WORLD_FRAME = "unity_xr_world"
+OCULUS_JOINT_ORDER: Tuple[str, ...] = (
+    "wrist",
+    "palm",
+    "thumb_metacarpal",
+    "thumb_proximal",
+    "thumb_distal",
+    "thumb_tip",
+    "index_metacarpal",
+    "index_proximal",
+    "index_intermediate",
+    "index_distal",
+    "index_tip",
+    "middle_metacarpal",
+    "middle_proximal",
+    "middle_intermediate",
+    "middle_distal",
+    "middle_tip",
+    "ring_metacarpal",
+    "ring_proximal",
+    "ring_intermediate",
+    "ring_distal",
+    "ring_tip",
+    "little_metacarpal",
+    "little_proximal",
+    "little_intermediate",
+    "little_distal",
+    "little_tip",
+)
 
 
 class OculusVRHandDetector(Component):
@@ -94,17 +125,120 @@ class OculusVRHandDetector(Component):
         self.sockets[robots.BUTTON] = create_pull_socket(self.host, self.button_port)
         self.sockets[robots.PAUSE] = create_pull_socket(self.host, self.teleop_reset_port)
 
-    def _process_keypoints(self, data):
-        """Process raw keypoint data into a list of coordinate values."""
-        data_str = data.decode().strip()
+    @staticmethod
+    def _quaternion_to_rotation_matrix(qx: float, qy: float, qz: float, qw: float):
+        quat = [float(qx), float(qy), float(qz), float(qw)]
+        norm = sum(value * value for value in quat) ** 0.5
+        if norm < 1e-8:
+            return (
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 0.0, 1.0),
+            )
+
+        x, y, z, w = (value / norm for value in quat)
+        xx, yy, zz = x * x, y * y, z * z
+        xy, xz, yz = x * y, x * z, y * z
+        wx, wy, wz = w * x, w * y, w * z
+        return (
+            (1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)),
+            (2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)),
+            (2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)),
+        )
+
+    def _pose_to_transform(
+        self, pose_values: Sequence[float]
+    ) -> Tuple[Tuple[float, float, float, float], ...]:
+        px, py, pz, qx, qy, qz, qw = (float(value) for value in pose_values)
+        rot = self._quaternion_to_rotation_matrix(qx, qy, qz, qw)
+        return (
+            (rot[0][0], rot[0][1], rot[0][2], px),
+            (rot[1][0], rot[1][1], rot[1][2], py),
+            (rot[2][0], rot[2][1], rot[2][2], pz),
+            (0.0, 0.0, 0.0, 1.0),
+        )
+
+    @staticmethod
+    def _split_message(data_str: str) -> tuple[str, str]:
+        mode, separator, body = data_str.partition(":")
+        if not separator:
+            raise ValueError("Hand payload is missing mode separator ':'.")
+        body = body.strip()
+        if body.endswith(":"):
+            body = body[:-1]
+        return mode.strip().lower(), body
+
+    def _parse_legacy_input_frame(self, data_str: str, hand_side: str) -> InputFrame:
+        mode, body = self._split_message(data_str)
         values = []
 
-        # Parse coordinates (format: <hand>:x,y,z|x,y,z|x,y,z)
-        coords = data_str.split(":")[1].strip().split("|")
-        for coord in coords:
-            values.extend(float(val) for val in coord.split(",")[:3])
+        for coord in body.split("|"):
+            coord = coord.strip()
+            if not coord:
+                continue
+            parts = coord.split(",")
+            if len(parts) < 3:
+                raise ValueError(f"Legacy joint entry must have at least 3 floats, got: {coord!r}")
+            values.extend(float(val) for val in parts[:3])
 
-        return values
+        return InputFrame(
+            timestamp_s=time.time(),
+            hand_side=hand_side,
+            keypoints=values,
+            is_relative=mode != robots.ABSOLUTE,
+            frame_vectors=None,
+        )
+
+    def _parse_pose_input_frame(self, data_str: str, hand_side: str) -> InputFrame:
+        mode, body = self._split_message(data_str)
+        joint_entries = [entry.strip() for entry in body.split("|") if entry.strip()]
+        if len(joint_entries) != len(OCULUS_JOINT_ORDER):
+            raise ValueError(
+                f"Expected {len(OCULUS_JOINT_ORDER)} joint entries, got {len(joint_entries)}."
+            )
+
+        keypoints = []
+        is_relative = mode != robots.ABSOLUTE
+        joint_transforms_world = {} if not is_relative else None
+        for joint_name, joint_entry in zip(OCULUS_JOINT_ORDER, joint_entries, strict=True):
+            values = [float(value) for value in joint_entry.split(",")]
+            if len(values) != 7:
+                raise ValueError(f"Pose joint entry must have 7 floats, got: {joint_entry!r}")
+            keypoints.extend(values[:3])
+            if joint_transforms_world is not None:
+                joint_transforms_world[joint_name] = self._pose_to_transform(values)
+
+        return InputFrame(
+            timestamp_s=time.time(),
+            hand_side=hand_side,
+            keypoints=keypoints,
+            is_relative=is_relative,
+            frame_vectors=None,
+            world_frame=UNITY_XR_WORLD_FRAME if not is_relative else None,
+            joint_order=OCULUS_JOINT_ORDER,
+            joint_transforms_world=joint_transforms_world,
+        )
+
+    def _parse_input_frame(self, data: bytes, hand_side: str) -> InputFrame:
+        data_str = data.decode().strip()
+        _, body = self._split_message(data_str)
+        first_joint = next((entry.strip() for entry in body.split("|") if entry.strip()), "")
+        field_count = len(first_joint.split(",")) if first_joint else 0
+
+        if field_count == 7:
+            return self._parse_pose_input_frame(data_str, hand_side=hand_side)
+        if field_count == 3:
+            return self._parse_legacy_input_frame(data_str, hand_side=hand_side)
+        raise ValueError(
+            "Unsupported hand payload: "
+            f"expected 3 or 7 floats per joint entry, got {field_count}. "
+            f"preview={data_str[:160]!r}"
+        )
+
+    @staticmethod
+    def _is_ignorable_hand_message(data: bytes) -> bool:
+        data_str = data.decode(errors="replace").strip()
+        return data_str.startswith("DIAGNOSTIC_TEST_")
 
     def _receive_data(self, socket_name):
         """Receive data from a socket."""
@@ -128,9 +262,20 @@ class OculusVRHandDetector(Component):
                 keypoint_data = self._receive_data(socket_key)
 
                 if keypoint_data is not None:
-                    # Process and publish keypoints for this hand
-                    keypoints = self._process_keypoints(keypoint_data)
-                    is_relative = not keypoint_data.decode().strip().startswith(robots.ABSOLUTE)
+                    if self._is_ignorable_hand_message(keypoint_data):
+                        continue
+                    try:
+                        input_frame = self._parse_input_frame(keypoint_data, hand_side=hand_side)
+                    except ValueError as exc:
+                        logger.warning(
+                            "Skipping malformed VR hand payload for side=%s: %s",
+                            hand_side,
+                            exc,
+                        )
+                        continue
+                    except Exception:
+                        logger.exception("Failed to parse VR hand payload for side=%s", hand_side)
+                        continue
 
                     # TODO: We really only need to publish ONCE!
                     # We can store all information in a single schema table
@@ -139,13 +284,7 @@ class OculusVRHandDetector(Component):
                         host=self.host,
                         port=self.oculus_pub_port,
                         topic=hand_side,
-                        data=InputFrame(
-                            timestamp_s=time.time(),
-                            hand_side=hand_side,
-                            keypoints=keypoints,
-                            is_relative=is_relative,
-                            frame_vectors=None,
-                        ),
+                        data=input_frame,
                     )
 
             # Process and publish button state (shared across hands)

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal, Optional, Sequence, Tuple
+from typing import Literal, Mapping, Optional, Sequence, Tuple
 
 """
 Detector → Operator contracts: minimal fields required by operators.
@@ -48,6 +48,9 @@ class InputFrame:
     - is_relative: whether keypoints are relative to wrist (1) or absolute (0),
       matching current detector output semantics.
     - frame_vectors: optional 3 orthonormal vectors (x,y,z) in absolute mode.
+    - world_frame: name of the fixed frame for absolute joint poses, if available.
+    - joint_order: ordered joint names matching detector payload indices.
+    - joint_transforms_world: optional 4x4 world-frame pose for each tracked joint.
     """
 
     timestamp_s: float
@@ -61,6 +64,9 @@ class InputFrame:
             Tuple[float, float, float],
         ]
     ] = None
+    world_frame: Optional[str] = None
+    joint_order: Optional[Sequence[str]] = None
+    joint_transforms_world: Optional[Mapping[str, Tuple[Tuple[float, ...], ...]]] = None
 
 
 __all__ = [
