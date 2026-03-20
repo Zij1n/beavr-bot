@@ -190,7 +190,7 @@ class OculusVRHandDetector(Component):
         )
 
     def _parse_pose_input_frame(self, data_str: str, hand_side: str) -> InputFrame:
-        mode, body = self._split_message(data_str)
+        _, body = self._split_message(data_str)
         joint_entries = [entry.strip() for entry in body.split("|") if entry.strip()]
         if len(joint_entries) != len(OCULUS_JOINT_ORDER):
             raise ValueError(
@@ -198,23 +198,21 @@ class OculusVRHandDetector(Component):
             )
 
         keypoints = []
-        is_relative = mode != robots.ABSOLUTE
-        joint_transforms_world = {} if not is_relative else None
+        joint_transforms_world = {}
         for joint_name, joint_entry in zip(OCULUS_JOINT_ORDER, joint_entries, strict=True):
             values = [float(value) for value in joint_entry.split(",")]
             if len(values) != 7:
                 raise ValueError(f"Pose joint entry must have 7 floats, got: {joint_entry!r}")
             keypoints.extend(values[:3])
-            if joint_transforms_world is not None:
-                joint_transforms_world[joint_name] = self._pose_to_transform(values)
+            joint_transforms_world[joint_name] = self._pose_to_transform(values)
 
         return InputFrame(
             timestamp_s=time.time(),
             hand_side=hand_side,
             keypoints=keypoints,
-            is_relative=is_relative,
+            is_relative=False,
             frame_vectors=None,
-            world_frame=UNITY_XR_WORLD_FRAME if not is_relative else None,
+            world_frame=UNITY_XR_WORLD_FRAME,
             joint_order=OCULUS_JOINT_ORDER,
             joint_transforms_world=joint_transforms_world,
         )
