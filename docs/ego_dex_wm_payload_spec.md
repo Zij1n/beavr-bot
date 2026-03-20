@@ -109,6 +109,12 @@ A real world-model backend should treat `xr_hand_joint_poses` as the authoritati
 
 Current live request schema:
 
+Important:
+
+- the numeric values shown below are **illustrative example values only**
+- they are **not** copied from a real live packet
+- they are chosen to show the JSON shape clearly
+
 ```json
 {
   "source": "xr_hand_joint_poses",
@@ -185,6 +191,7 @@ Current live request schema:
 Notes:
 
 - The example truncates arrays for readability.
+- The numeric matrix entries shown in the example are illustrative, not recorded runtime values.
 - In real traffic, `keypoints_xyz` has `26 x 3` values.
 - In real traffic, `joint_transforms_world` has 26 entries, one per joint.
 - The example above now shows the full set of joint keys, but uses `...` for most matrix values to keep the schema readable.
