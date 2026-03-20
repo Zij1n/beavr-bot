@@ -79,9 +79,13 @@ class WMClient:
             return response.body
         if response.content_type == "application/json":
             decoded = json.loads(response.body.decode("utf-8"))
-            if not isinstance(decoded, Mapping):
-                raise ValueError("WM /wm_step JSON response must be an object.")
-            return self._extract_observation_bytes(decoded)
+            if isinstance(decoded, Mapping):
+                return self._extract_observation_bytes(decoded)
+            if isinstance(decoded, str):
+                return self._decode_base64_image(decoded)
+            raise ValueError("WM /wm_step JSON response must be an object or base64 string.")
+        if response.content_type in {"text/plain", "text/html"}:
+            return self._decode_base64_image(response.body.decode("utf-8"))
         raise ValueError(f"Unsupported WM /wm_step response type: {response.content_type}")
 
     def reset(self, new: bool) -> Tuple[bytes, Mapping[str, Any]]:

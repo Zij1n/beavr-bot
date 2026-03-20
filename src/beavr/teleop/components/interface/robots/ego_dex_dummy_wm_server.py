@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -279,7 +281,13 @@ def _is_placeholder_transform(transform: np.ndarray) -> bool:
 class DummyWMServer:
     """Testing WM service that renders world-frame XR hand poses."""
 
-    def __init__(self, dof: int = 16, width: int = 960, height: int = 720):
+    def __init__(
+        self,
+        dof: int = 16,
+        width: int = 960,
+        height: int = 720,
+        payload_log_dir: str = "logs/dummy_wm_server",
+    ):
         self._dof = int(dof)
         self._width = int(width)
         self._height = int(height)
@@ -296,6 +304,30 @@ class DummyWMServer:
         self._world_frame_by_side: Dict[str, Optional[str]] = {robots.LEFT: None, robots.RIGHT: None}
         self._last_reset_s = time.time()
         self._step_count = 0
+        os.makedirs(payload_log_dir, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        self._payload_log_path = os.path.join(payload_log_dir, f"dummy_wm_payloads_{timestamp}.jsonl")
+        self._payload_log_file = open(self._payload_log_path, "a", buffering=1)
+        self._payload_log_lock = threading.Lock()
+
+    @property
+    def payload_log_path(self) -> str:
+        return self._payload_log_path
+
+    def log_request(self, endpoint: str, payload: Mapping[str, Any], client_address: str) -> None:
+        record = {
+            "event": "dummy_wm_request",
+            "received_at_s": time.time(),
+            "endpoint": endpoint,
+            "client_address": client_address,
+            "payload": dict(payload),
+        }
+        with self._payload_log_lock:
+            self._payload_log_file.write(json.dumps(record) + "\n")
+
+    def close(self) -> None:
+        with self._payload_log_lock:
+            self._payload_log_file.close()
 
     def _sanitize_action(self, values: Any) -> np.ndarray:
         array = np.asarray(values, dtype=np.float32).reshape(-1)
@@ -479,6 +511,7 @@ class DummyWMServer:
             "ok": True,
             "step_count": self._step_count,
             "last_reset_s": self._last_reset_s,
+            "payload_log_path": self._payload_log_path,
             "has_left_keypoints": self._latest_keypoints[robots.LEFT] is not None,
             "has_right_keypoints": self._latest_keypoints[robots.RIGHT] is not None,
             "has_left_joint_transforms_world": self._latest_joint_transforms_world[robots.LEFT]
@@ -549,6 +582,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._write_json({"error": str(exc)}, status=400)
             return
 
+        self.server.wm_server.log_request(
+            endpoint=self.path,
+            payload=payload,
+            client_address=str(self.client_address[0]),
+        )
+
         if self.path == "/wm_step":
             try:
                 jpg_bytes = self.server.wm_server.wm_step(payload)
@@ -577,11 +616,18 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=960)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--dof", type=int, default=16)
+    parser.add_argument("--payload-log-dir", default="logs/dummy_wm_server")
     args = parser.parse_args()
 
-    wm_server = DummyWMServer(dof=args.dof, width=args.width, height=args.height)
+    wm_server = DummyWMServer(
+        dof=args.dof,
+        width=args.width,
+        height=args.height,
+        payload_log_dir=args.payload_log_dir,
+    )
     http_server = _DummyWMHTTPServer((args.host, args.port), _RequestHandler, wm_server)
     print(f"Dummy WM server listening on http://{args.host}:{args.port}")
+    print(f"Payload log: {wm_server.payload_log_path}")
     try:
         http_server.serve_forever()
     except KeyboardInterrupt:
@@ -589,6 +635,7 @@ def main() -> None:
     finally:
         http_server.shutdown()
         http_server.server_close()
+        wm_server.close()
 
 
 if __name__ == "__main__":
