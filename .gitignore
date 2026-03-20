@@ -27,6 +27,7 @@ urdf/*
 *.mp4
 
 # Logs
+logs/
 logs/pose_log*
 logs/*.json
 logs/*.txt
