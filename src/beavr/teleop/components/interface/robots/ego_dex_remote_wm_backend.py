@@ -8,6 +8,8 @@ from typing import Any, Mapping, Optional, Tuple
 import cv2
 import numpy as np
 
+from beavr.teleop.configs.constants import robots
+
 from .ego_dex_wm_client import WMClient
 
 logger = logging.getLogger(__name__)
@@ -27,19 +29,23 @@ class RemoteEgoDexWMBackend:
         self,
         wm_client: WMClient,
         dof: int = 16,
-        heartbeat_hz: float = 10.0,
+        heartbeat_hz: float = 15.0,
         bootstrap_reset: bool = True,
     ):
         self._wm_client = wm_client
         self._dof = int(dof)
         self._default_joint_state = np.zeros(self._dof, dtype=np.float32)
-        self._heartbeat_period_s = 1.0 / max(float(heartbeat_hz), 1.0)
+        self._step_period_s = 1.0 / max(float(heartbeat_hz), 1.0)
         self._latest_obs_frame: Optional[np.ndarray] = None
         self._latest_state: Mapping[str, Any] = {}
         self._last_event_record: Optional[dict] = None
         self._last_obs_wall_time_s = 0.0
-        self._last_payload: Optional[dict[str, Any]] = None
+        self._last_request_wall_time_s = 0.0
         self._last_action_by_side: dict[str, dict[str, Any]] = {}
+        self._latest_input_by_side: dict[str, dict[str, Any]] = {
+            robots.LEFT: {},
+            robots.RIGHT: {},
+        }
 
         if bootstrap_reset:
             try:
@@ -80,22 +86,115 @@ class RemoteEgoDexWMBackend:
         self._last_obs_wall_time_s = now_s
         self._latest_state = dict(self._latest_state)
 
-        hand_side = str(payload.get("hand_side", "right"))
-        joint_positions = payload.get("joint_positions_rad")
-        if joint_positions is not None:
-            self._latest_state[f"{hand_side}_joint_state"] = joint_positions
+        hands = payload.get("hands") if isinstance(payload, Mapping) else None
+        if isinstance(hands, Mapping):
+            for side, hand_payload in hands.items():
+                if not isinstance(hand_payload, Mapping):
+                    continue
+                joint_positions = hand_payload.get("joint_positions_rad")
+                if joint_positions is not None:
+                    self._latest_state[f"{side}_joint_state"] = joint_positions
+            hands_with_keypoints = sorted(
+                side
+                for side, hand_payload in hands.items()
+                if isinstance(hand_payload, Mapping) and hand_payload.get("keypoints_xyz") is not None
+            )
+            hands_with_transforms = sorted(
+                side
+                for side, hand_payload in hands.items()
+                if isinstance(hand_payload, Mapping)
+                and hand_payload.get("joint_transforms_world") is not None
+            )
+            hands_with_actions = sorted(
+                side
+                for side, hand_payload in hands.items()
+                if isinstance(hand_payload, Mapping) and hand_payload.get("joint_positions_rad") is not None
+            )
+        else:
+            hands_with_keypoints = []
+            hands_with_transforms = []
+            hands_with_actions = []
 
         self._last_event_record = {
             "event": event_name,
             "received_at_s": now_s,
-            "hand_side": hand_side,
             "timestamp_s": payload.get("timestamp_s"),
-            "has_keypoints": "keypoints_xyz" in payload,
-            "has_joint_transforms_world": "joint_transforms_world" in payload,
+            "wm_step_schema": "two_hand_snapshot",
+            "hands_with_keypoints": hands_with_keypoints,
+            "hands_with_joint_transforms_world": hands_with_transforms,
+            "hands_with_actions": hands_with_actions,
             "world_frame": payload.get("world_frame"),
-            "is_relative": payload.get("is_relative"),
-            "action_dof": len(joint_positions) if isinstance(joint_positions, list) else None,
+            "action_dof_by_side": {
+                side: len(hand_payload.get("joint_positions_rad"))
+                for side, hand_payload in (hands.items() if isinstance(hands, Mapping) else [])
+                if isinstance(hand_payload, Mapping)
+                and isinstance(hand_payload.get("joint_positions_rad"), list)
+            },
         }
+
+    @staticmethod
+    def _copy_joint_transforms_world(joint_transforms_world: Any) -> Optional[dict[str, Any]]:
+        if joint_transforms_world is None:
+            return None
+        if not isinstance(joint_transforms_world, Mapping):
+            return None
+        return {
+            str(joint_name): transform
+            for joint_name, transform in joint_transforms_world.items()
+        }
+
+    def _build_hand_payload(self, side: str) -> Optional[dict[str, Any]]:
+        input_payload = self._latest_input_by_side.get(side, {})
+        action_payload = self._last_action_by_side.get(side)
+        if not input_payload and action_payload is None:
+            return None
+
+        source = input_payload.get("source")
+        if source is None:
+            source = "action_only" if action_payload is not None else "none"
+
+        return {
+            "source": source,
+            "timestamp_s": input_payload.get("timestamp_s"),
+            "keypoints_xyz": input_payload.get("keypoints_xyz"),
+            "is_relative": bool(input_payload.get("is_relative", False)),
+            "world_frame": input_payload.get("world_frame"),
+            "joint_order": input_payload.get("joint_order"),
+            "joint_transforms_world": input_payload.get("joint_transforms_world"),
+            "joint_positions_rad": (
+                action_payload.get("joint_positions_rad") if action_payload is not None else None
+            ),
+            "action_timestamp_s": action_payload.get("timestamp_s") if action_payload is not None else None,
+        }
+
+    def _build_snapshot_payload(self) -> Optional[dict[str, Any]]:
+        hands = {
+            robots.LEFT: self._build_hand_payload(robots.LEFT),
+            robots.RIGHT: self._build_hand_payload(robots.RIGHT),
+        }
+        if hands[robots.LEFT] is None and hands[robots.RIGHT] is None:
+            return None
+
+        input_timestamps = [
+            hand_payload.get("timestamp_s")
+            for hand_payload in hands.values()
+            if isinstance(hand_payload, Mapping) and hand_payload.get("timestamp_s") is not None
+        ]
+        world_frames = {
+            hand_payload.get("world_frame")
+            for hand_payload in hands.values()
+            if isinstance(hand_payload, Mapping) and hand_payload.get("world_frame")
+        }
+
+        payload: dict[str, Any] = {
+            "source": "two_hand_snapshot",
+            "sent_at_s": time.time(),
+            "timestamp_s": max(input_timestamps) if input_timestamps else time.time(),
+            "hands": hands,
+        }
+        if len(world_frames) == 1:
+            payload["world_frame"] = next(iter(world_frames))
+        return payload
 
     def reset(self, new: bool = True) -> Tuple[Optional[np.ndarray], Mapping[str, Any]]:
         obs_jpg, state = self._wm_client.reset(new=new)
@@ -134,37 +233,28 @@ class RemoteEgoDexWMBackend:
         keypoints = np.asarray(keypoints_xyz, dtype=np.float32)
         if keypoints.ndim != 2 or keypoints.shape[1] != 3:
             return
-
-        payload: dict[str, Any] = {
+        self._latest_input_by_side[side] = {
             "source": "xr_hand_joint_poses" if joint_transforms_world is not None else "vr_keypoints",
-            "hand_side": side,
             "timestamp_s": float(timestamp_s),
             "keypoints_xyz": keypoints.tolist(),
             "is_relative": bool(is_relative),
+            "world_frame": str(world_frame) if world_frame else None,
+            "joint_order": list(joint_order) if joint_order is not None else None,
+            "joint_transforms_world": self._copy_joint_transforms_world(joint_transforms_world),
         }
-        if world_frame:
-            payload["world_frame"] = str(world_frame)
-        if joint_order is not None:
-            payload["joint_order"] = list(joint_order)
-        payload["joint_transforms_world"] = (
-            dict(joint_transforms_world) if joint_transforms_world is not None else None
-        )
-        latest_action = self._last_action_by_side.get(side)
-        if latest_action is not None:
-            payload["joint_positions_rad"] = latest_action["joint_positions_rad"]
-
-        self._last_payload = payload
-        self._request_step(payload, event_name="remote_wm_keypoints")
 
     def step(self) -> None:
-        if self._last_payload is None:
+        payload = self._build_snapshot_payload()
+        if payload is None:
             return
-        if time.time() - self._last_obs_wall_time_s < self._heartbeat_period_s:
+        now_s = time.time()
+        if now_s - self._last_request_wall_time_s < self._step_period_s:
             return
+        self._last_request_wall_time_s = now_s
         try:
-            self._request_step(self._last_payload, event_name="remote_wm_heartbeat")
+            self._request_step(payload, event_name="remote_wm_step")
         except Exception:
-            logger.exception("Remote WM heartbeat failed")
+            logger.exception("Remote WM step failed")
 
     def get_joint_state(self, side: str) -> np.ndarray:
         joint_state = self._extract_joint_state(side)

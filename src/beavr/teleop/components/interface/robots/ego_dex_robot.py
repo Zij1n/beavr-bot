@@ -101,7 +101,7 @@ class EgoDexSessionLogger:
                 "observation_transport": "wm_client_jpg",
                 "action_schema": "joint_positions_rad[16]",
                 "keypoint_schema": f"{robots.OCULUS_NUM_KEYPOINTS}x3",
-                "pose_schema": f"{robots.OCULUS_NUM_KEYPOINTS}x4x4 world-frame hand poses when detector mode=absolute",
+                "pose_schema": f"{robots.OCULUS_NUM_KEYPOINTS}x4x4 world-frame hand poses when available",
             }
         )
 
@@ -268,15 +268,6 @@ class EgoDexRobot(Component):
             except Exception:
                 logger.exception("Backend on_keypoints failed for side=%s", side)
 
-        try:
-            pose_record = self._backend.pop_pose_record()
-        except Exception:
-            logger.exception("Backend pose logging hook failed")
-            pose_record = None
-
-        if pose_record is not None:
-            self._logger.log(pose_record)
-
     def _publish_joint_states(self) -> None:
         for side, port in self._joint_state_ports.items():
             try:
@@ -338,6 +329,13 @@ class EgoDexRobot(Component):
             self._backend.step()
         except Exception:
             logger.exception("Backend step failed")
+        try:
+            pose_record = self._backend.pop_pose_record()
+        except Exception:
+            logger.exception("Backend pose logging hook failed")
+            pose_record = None
+        if pose_record is not None:
+            self._logger.log(pose_record)
         self._publish_joint_states()
         self._publish_observation()
 

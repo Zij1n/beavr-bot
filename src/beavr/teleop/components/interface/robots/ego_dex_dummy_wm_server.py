@@ -410,6 +410,75 @@ class DummyWMServer:
         timestamp = float(timestamp_s) if isinstance(timestamp_s, (int, float)) else None
         return side, action, keypoints, joint_transforms_world, world_frame, timestamp
 
+    def _apply_hand_update(
+        self,
+        side: str,
+        action: Optional[np.ndarray],
+        keypoints: Optional[np.ndarray],
+        joint_transforms_world: Optional[Dict[str, np.ndarray]],
+        world_frame: Optional[str],
+        timestamp_s: Optional[float],
+        *,
+        clear_transforms: bool,
+    ) -> None:
+        if action is not None:
+            if side == robots.LEFT:
+                self._left_joint_state = action
+            else:
+                self._right_joint_state = action
+        if keypoints is not None:
+            self._latest_keypoints[side] = keypoints
+        if clear_transforms:
+            self._latest_joint_transforms_world[side] = None
+            self._world_frame_by_side[side] = None
+            if keypoints is not None:
+                self._latest_source[side] = "keypoints"
+        elif joint_transforms_world is not None:
+            self._latest_joint_transforms_world[side] = joint_transforms_world
+            self._latest_source[side] = "joint_transforms_world"
+        elif keypoints is not None:
+            self._latest_source[side] = "keypoints"
+        if world_frame is not None:
+            self._world_frame_by_side[side] = world_frame
+        if keypoints is not None or joint_transforms_world is not None:
+            self._last_pose_timestamps[side] = timestamp_s if timestamp_s is not None else time.time()
+
+    def _apply_snapshot_payload(self, payload: Mapping[str, Any]) -> None:
+        hands = payload.get("hands")
+        if not isinstance(hands, Mapping):
+            return
+
+        default_world_frame = payload.get("world_frame")
+        if not isinstance(default_world_frame, str):
+            default_world_frame = None
+        default_timestamp_s = payload.get("timestamp_s")
+        if not isinstance(default_timestamp_s, (int, float)):
+            default_timestamp_s = None
+
+        for side in (robots.LEFT, robots.RIGHT):
+            hand_payload = hands.get(side)
+            if hand_payload is None:
+                continue
+            if not isinstance(hand_payload, Mapping):
+                continue
+            decoded_payload = dict(hand_payload)
+            decoded_payload["hand_side"] = side
+            _, action, keypoints, joint_transforms_world, world_frame, timestamp_s = self._decode_payload(
+                decoded_payload
+            )
+            clear_transforms = (
+                "joint_transforms_world" in decoded_payload and joint_transforms_world is None
+            )
+            self._apply_hand_update(
+                side,
+                action,
+                keypoints,
+                joint_transforms_world,
+                world_frame if world_frame is not None else default_world_frame,
+                timestamp_s if timestamp_s is not None else default_timestamp_s,
+                clear_transforms=clear_transforms,
+            )
+
     def _state_dict(self) -> Dict[str, Any]:
         return {
             "left_joint_state": self._left_joint_state.tolist(),
@@ -466,30 +535,21 @@ class DummyWMServer:
         return np.asarray(buffer).tobytes()
 
     def wm_step(self, payload: Mapping[str, Any]) -> bytes:
-        side, action, keypoints, joint_transforms_world, world_frame, timestamp_s = self._decode_payload(
-            payload
-        )
-        if action is not None:
-            if side == robots.LEFT:
-                self._left_joint_state = action
-            else:
-                self._right_joint_state = action
-        if keypoints is not None:
-            self._latest_keypoints[side] = keypoints
-        if "joint_transforms_world" in payload and joint_transforms_world is None:
-            self._latest_joint_transforms_world[side] = None
-            self._world_frame_by_side[side] = None
-            if keypoints is not None:
-                self._latest_source[side] = "keypoints"
-        elif joint_transforms_world is not None:
-            self._latest_joint_transforms_world[side] = joint_transforms_world
-            self._latest_source[side] = "joint_transforms_world"
-        elif keypoints is not None:
-            self._latest_source[side] = "keypoints"
-        if world_frame is not None:
-            self._world_frame_by_side[side] = world_frame
-        if keypoints is not None or joint_transforms_world is not None:
-            self._last_pose_timestamps[side] = timestamp_s if timestamp_s is not None else time.time()
+        if isinstance(payload.get("hands"), Mapping):
+            self._apply_snapshot_payload(payload)
+        else:
+            side, action, keypoints, joint_transforms_world, world_frame, timestamp_s = self._decode_payload(
+                payload
+            )
+            self._apply_hand_update(
+                side,
+                action,
+                keypoints,
+                joint_transforms_world,
+                world_frame,
+                timestamp_s,
+                clear_transforms=("joint_transforms_world" in payload and joint_transforms_world is None),
+            )
         self._step_count += 1
         return self._encode_jpg(self._render())
 

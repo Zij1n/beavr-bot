@@ -2,45 +2,44 @@
 
 ## Purpose
 
-This document describes the JSON payload sent from the EgoDex teleoperation stack to a world-model service through `WMClient`.
+This document defines the HTTP request/response contract between the EgoDex teleoperation stack and a WM service.
 
-It is written for a backend developer with zero context of this repository.
+It is written for a WM backend developer with zero context of this repository.
 
-It explains:
+It describes:
 
-- how the WM service is called
-- what JSON fields are sent on each update
+- which endpoint is called
+- how often it is called
+- the exact JSON shape sent to the WM service
+- the shape of every array in that JSON
 - which fields are authoritative
-- which fields are auxiliary
 - what the WM service must return
-- what assumptions the teleop side makes about state, timing, and idempotency
 
-This document describes the **WM-facing contract**.
-It does **not** describe the raw Quest / Unity socket format.
-The raw headset payload is parsed inside the teleop process first, then converted into the JSON described here.
+This document describes the **WM-facing payload**, not the raw headset socket payload.
 
-## System Overview
+## Runtime Model
 
-At runtime there are four relevant pieces:
+The teleop process keeps the latest:
 
-1. VR / XR hand tracking app
-2. EgoDex teleop process
-3. `WMClient`
-4. WM service
+- left-hand pose data
+- right-hand pose data
+- left-hand action
+- right-hand action
 
-The WM service does not talk directly to the headset app.
-It only receives HTTP JSON requests from `WMClient`.
+Then it calls `wm_step` at a fixed rate of **15 Hz**.
 
-The teleop side maintains the transport and sends a `wm_step` request whenever a fresh hand update arrives, plus periodic heartbeat replays of the latest payload to keep the observation stream alive.
+Each `wm_step` call sends a **two-hand snapshot payload** containing the latest known state for both hands.
+
+This is the canonical WM contract.
 
 ## Transport Contract
 
-The teleop side calls two HTTP endpoints:
+The teleop side calls:
 
 - `POST /wm_step`
 - `POST /reset`
 
-Implementation references:
+Reference files:
 
 - [ego_dex_wm_client.py](/scratch/zh2025/ICL_video_gen/data/beavr-bot/src/beavr/teleop/components/interface/robots/ego_dex_wm_client.py)
 - [ego_dex_remote_wm_backend.py](/scratch/zh2025/ICL_video_gen/data/beavr-bot/src/beavr/teleop/components/interface/robots/ego_dex_remote_wm_backend.py)
@@ -53,276 +52,96 @@ Preferred response content type:
 
 - `image/jpeg`
 
-## High-Level Semantics
-
-Each `wm_step` request is a **single-hand trigger update**.
-
-That means:
-
-- `hand_side` tells you which hand caused this update
-- the payload may include the latest action for that same hand
-- the WM service is expected to maintain world state across calls
-- the WM service may render both hands even though only one hand triggered the request
-
-The teleop side does not send a full scene snapshot on every call.
-The WM service should be stateful.
-
-## Primary Input Modes
-
-There are two practical payload shapes.
-
-### Primary mode: XR hand joint poses
-
-This is the main path for the real WM backend.
-
-In this mode, the request contains:
-
-- `joint_transforms_world`
-- `joint_order`
-- `world_frame`
-- `keypoints_xyz`
-- optional `joint_positions_rad`
-
-This mode is identified by:
-
-- `source = "xr_hand_joint_poses"`
-
-### Fallback mode: keypoints only
-
-This is a degraded fallback for older detector payloads.
-
-In this mode, the request contains:
-
-- `keypoints_xyz`
-- optional `joint_positions_rad`
-- no usable `joint_transforms_world`
-
-This mode is identified by:
-
-- `source = "vr_keypoints"`
-
-A real world-model backend should treat `xr_hand_joint_poses` as the authoritative path.
-
 ## `POST /wm_step`
 
-### Request Schema
+### Request Frequency
 
-Current live request schema, shown as **JSONC-style pseudocode** so the shape of every array is explicit:
+The teleop side sends one snapshot every `1/15` second by default.
+
+Important:
+
+- `wm_step` is no longer a one-hand trigger event
+- `wm_step` is a periodic two-hand snapshot
+- one or both hands may still contain `null` fields if data has not been observed yet
+
+### Canonical Request Schema
+
+The live payload is best understood as JSONC-style pseudocode:
 
 ```jsonc
 {
-  "source": "xr_hand_joint_poses",                    // string
-  "hand_side": "right",                              // string: "left" | "right"
-  "timestamp_s": "<float seconds>",                  // scalar float
-  "keypoints_xyz": "<float[26][3]>",                 // 26 joints, each [x, y, z]
-  "is_relative": false,                               // bool
-  "world_frame": "unity_xr_world",                   // string
-  "joint_order": [                                    // string[26]
-    "wrist",
-    "palm",
-    "thumb_metacarpal",
-    "thumb_proximal",
-    "thumb_distal",
-    "thumb_tip",
-    "index_metacarpal",
-    "index_proximal",
-    "index_intermediate",
-    "index_distal",
-    "index_tip",
-    "middle_metacarpal",
-    "middle_proximal",
-    "middle_intermediate",
-    "middle_distal",
-    "middle_tip",
-    "ring_metacarpal",
-    "ring_proximal",
-    "ring_intermediate",
-    "ring_distal",
-    "ring_tip",
-    "little_metacarpal",
-    "little_proximal",
-    "little_intermediate",
-    "little_distal",
-    "little_tip"
-  ],
-  "joint_transforms_world": {                         // object with 26 keys, each value float[4][4]
-    "wrist": [
-      ["<r00>", "<r01>", "<r02>", "<tx>"],
-      ["<r10>", "<r11>", "<r12>", "<ty>"],
-      ["<r20>", "<r21>", "<r22>", "<tz>"],
-      [0.0, 0.0, 0.0, 1.0]
-    ],
-    "palm": "<float[4][4]>",
-    "thumb_metacarpal": "<float[4][4]>",
-    "thumb_proximal": "<float[4][4]>",
-    "thumb_distal": "<float[4][4]>",
-    "thumb_tip": "<float[4][4]>",
-    "index_metacarpal": "<float[4][4]>",
-    "index_proximal": "<float[4][4]>",
-    "index_intermediate": "<float[4][4]>",
-    "index_distal": "<float[4][4]>",
-    "index_tip": "<float[4][4]>",
-    "middle_metacarpal": "<float[4][4]>",
-    "middle_proximal": "<float[4][4]>",
-    "middle_intermediate": "<float[4][4]>",
-    "middle_distal": "<float[4][4]>",
-    "middle_tip": "<float[4][4]>",
-    "ring_metacarpal": "<float[4][4]>",
-    "ring_proximal": "<float[4][4]>",
-    "ring_intermediate": "<float[4][4]>",
-    "ring_distal": "<float[4][4]>",
-    "ring_tip": "<float[4][4]>",
-    "little_metacarpal": "<float[4][4]>",
-    "little_proximal": "<float[4][4]>",
-    "little_intermediate": "<float[4][4]>",
-    "little_distal": "<float[4][4]>",
-    "little_tip": "<float[4][4]>"
-  },
-  "joint_positions_rad": "<float[16]>"              // optional
+  "source": "two_hand_snapshot",                  // string
+  "sent_at_s": "<float seconds>",                 // scalar float, when teleop sent this HTTP request
+  "timestamp_s": "<float seconds>",               // scalar float, max hand timestamp currently cached
+  "world_frame": "unity_xr_world",                // string when known, may be omitted
+  "hands": {                                       // object with exactly 2 keys
+    "left": "<HandPayload | null>",
+    "right": "<HandPayload | null>"
+  }
 }
 ```
 
-Array shapes at a glance:
+Where `HandPayload` has this shape:
 
+```jsonc
+{
+  "source": "xr_hand_joint_poses",               // string: "xr_hand_joint_poses" | "vr_keypoints" | "action_only" | "none"
+  "timestamp_s": "<float seconds | null>",
+  "keypoints_xyz": "<float[26][3] | null>",
+  "is_relative": false,                            // bool
+  "world_frame": "unity_xr_world",               // string | null
+  "joint_order": "<string[26] | null>",
+  "joint_transforms_world": "<JointTransformMap | null>",
+  "joint_positions_rad": "<float[16] | null>",
+  "action_timestamp_s": "<float seconds | null>"
+}
+```
+
+Where `JointTransformMap` has this shape:
+
+```jsonc
+{
+  "wrist": "<float[4][4]>",
+  "palm": "<float[4][4]>",
+  "thumb_metacarpal": "<float[4][4]>",
+  "thumb_proximal": "<float[4][4]>",
+  "thumb_distal": "<float[4][4]>",
+  "thumb_tip": "<float[4][4]>",
+  "index_metacarpal": "<float[4][4]>",
+  "index_proximal": "<float[4][4]>",
+  "index_intermediate": "<float[4][4]>",
+  "index_distal": "<float[4][4]>",
+  "index_tip": "<float[4][4]>",
+  "middle_metacarpal": "<float[4][4]>",
+  "middle_proximal": "<float[4][4]>",
+  "middle_intermediate": "<float[4][4]>",
+  "middle_distal": "<float[4][4]>",
+  "middle_tip": "<float[4][4]>",
+  "ring_metacarpal": "<float[4][4]>",
+  "ring_proximal": "<float[4][4]>",
+  "ring_intermediate": "<float[4][4]>",
+  "ring_distal": "<float[4][4]>",
+  "ring_tip": "<float[4][4]>",
+  "little_metacarpal": "<float[4][4]>",
+  "little_proximal": "<float[4][4]>",
+  "little_intermediate": "<float[4][4]>",
+  "little_distal": "<float[4][4]>",
+  "little_tip": "<float[4][4]>"
+}
+```
+
+### Array Shapes Summary
+
+- top-level `hands`: 2 keys exactly, `left` and `right`
 - `keypoints_xyz`: `float[26][3]`
 - `joint_order`: `string[26]`
 - `joint_transforms_world[joint_name]`: `float[4][4]`
 - `joint_transforms_world`: 26 named matrices total
 - `joint_positions_rad`: `float[16]` when present
 
-Important:
+### Joint Order
 
-- placeholder tokens like `<r00>` or `<tx>` are not literal payload values
-- they are symbolic names used only to show matrix structure
-- the only fixed numeric row in a real transform is the last row: `[0.0, 0.0, 0.0, 1.0]`
-
-## Field-by-Field Definitions
-
-### `source`
-
-Type:
-
-- string
-
-Allowed values currently used:
-
-- `"xr_hand_joint_poses"`
-- `"vr_keypoints"`
-
-Meaning:
-
-- identifies whether the payload includes full joint poses or only keypoints
-
-Backend guidance:
-
-- prefer `joint_transforms_world` when `source == "xr_hand_joint_poses"`
-- use `keypoints_xyz` only as fallback or debugging support
-
-### `hand_side`
-
-Type:
-
-- string
-
-Allowed values:
-
-- `"left"`
-- `"right"`
-
-Meaning:
-
-- identifies which hand triggered this update
-
-Important:
-
-- this does not mean the other hand is invalid
-- the WM service should usually keep the latest state for both hands internally
-
-### `timestamp_s`
-
-Type:
-
-- float
-
-Meaning:
-
-- timestamp attached on the teleop side when the hand update was parsed
-
-Important:
-
-- heartbeats may resend the latest payload with the same timestamp
-- the WM service should tolerate repeated payloads
-- do not assume strict monotonic increase on every HTTP call
-
-### `keypoints_xyz`
-
-Type:
-
-- nested float array
-- shape: `26 x 3`
-
-Meaning:
-
-- per-joint tracked 3D positions
-- included for compatibility, fallback rendering, debugging, and sanity checking
-
-Coordinate frame:
-
-- same frame as `joint_transforms_world` when pose data is present
-- currently labeled by `world_frame = "unity_xr_world"`
-
-Backend guidance:
-
-- do not treat this as the main pose representation when `joint_transforms_world` is present
-- it is useful for consistency checks and fallback logic
-
-### `is_relative`
-
-Type:
-
-- boolean
-
-Current meaning:
-
-- for legacy keypoint-only packets, this reflects the old detector mode semantics
-- for current 7-float XR pose packets, the teleop side now normalizes them into world-frame joint poses and sends `false`
-
-Backend guidance:
-
-- for the real WM backend, this field is informational only
-- do not gate pose handling on this flag when `joint_transforms_world` is present
-
-### `world_frame`
-
-Type:
-
-- string or absent
-
-Current value for XR pose packets:
-
-- `"unity_xr_world"`
-
-Meaning:
-
-- identifies the fixed coordinate frame of the joint poses and positions
-
-Important:
-
-- every transform in `joint_transforms_world` is expressed in this frame
-- this is an absolute frame, not wrist-relative and not parent-relative
-
-### `joint_order`
-
-Type:
-
-- list of 26 strings
-
-Meaning:
-
-- canonical joint ordering matching the tracked hand skeleton
-- useful if your backend wants deterministic array packing instead of a dictionary
-
-Current order:
+The 26 tracked joints are always ordered as:
 
 1. `wrist`
 2. `palm`
@@ -351,18 +170,24 @@ Current order:
 25. `little_distal`
 26. `little_tip`
 
+## Meaning of the Main Fields
+
+### `hands.left` and `hands.right`
+
+These contain the latest cached state for each side.
+
+Possible cases:
+
+- full XR pose data present
+- only keypoints present
+- only action present
+- no data yet, in which case the side may be `null`
+
 ### `joint_transforms_world`
 
-Type:
+This is the primary pose input for the real WM backend.
 
-- mapping from joint name to `4 x 4` float matrix
-
-Shape:
-
-- 26 entries when present
-- each matrix has shape `4 x 4`
-
-Matrix layout:
+Each value is a `4x4` homogeneous transform:
 
 ```text
 H_world_joint =
@@ -372,89 +197,79 @@ H_world_joint =
 [  0   0   0   1 ]
 ```
 
-Where:
+Meaning:
 
-- `R` is the `3 x 3` joint orientation
-- `t = [tx, ty, tz]` is the joint position
+- `R` is the `3x3` joint orientation
+- `[tx, ty, tz]` is the joint position
 - both are expressed in the fixed `world_frame`
 
 Critical semantics:
 
-- this is the authoritative pose representation
-- these transforms are absolute poses in world frame
-- they are not parent-relative transforms
-- they are not wrist-relative transforms
-- they are not normalized hand-local transforms
+- these are **world-frame absolute poses**
+- they are not parent-relative
+- they are not wrist-relative
+- they are not normalized hand-local poses
 
-Backend guidance:
+If you need parent-relative transforms, compute them yourself:
 
-- use this field as the main input for the real world-model backend
-- if you need parent-relative transforms, compute them yourself:
-  - `H_parent_joint = inv(H_world_parent) @ H_world_joint`
+```text
+H_parent_joint = inv(H_world_parent) @ H_world_joint
+```
+
+### `keypoints_xyz`
+
+This is a `26 x 3` landmark array.
+
+It is included for:
+
+- compatibility
+- fallback rendering
+- debugging
+- sanity checking
+
+If `joint_transforms_world` is present, use that as the primary signal.
 
 ### `joint_positions_rad`
 
-Type:
+This is optional auxiliary hand action/state.
 
-- optional list of 16 floats
+Shape:
+
+- `float[16]`
 
 Meaning:
 
-- retargeted finger action generated by the teleop-side Leap hand operator
-- this is auxiliary action/state information
-- it is not the primary full-hand pose representation
+- a 16-DoF retargeted finger action vector
+- not a full hand pose representation
+- not required for rendering if `joint_transforms_world` is present
 
-Grouping:
+Finger grouping:
 
-- indices `0:4` = index finger
-- indices `4:8` = middle finger
-- indices `8:12` = ring finger
-- indices `12:16` = thumb
+- `0:4` index
+- `4:8` middle
+- `8:12` ring
+- `12:16` thumb
 
-Not included here:
+### `is_relative`
 
-- wrist translation
-- wrist world orientation as a command
-- forearm pose
-- shoulder pose
+This field is informational.
 
-Backend guidance:
+For the current XR pose path, the teleop side converts incoming pose packets into world-frame hand poses before forwarding to WM.
 
-- treat this as optional side information
-- do not reconstruct the full hand or arm from this vector if `joint_transforms_world` is available
+Practical guidance:
 
-## What The WM Service Should Do
+- if `joint_transforms_world` is present, do not gate pose handling on `is_relative`
 
-For a real world-model backend, the intended use is:
+## Recommended Backend Behavior
 
-1. keep the latest state for both hands
-2. on each `wm_step`, update only the side that triggered the request
-3. use `joint_transforms_world` as the authoritative pose input
-4. optionally use `joint_positions_rad` as an auxiliary action/control signal
-5. render or generate the current observation image
-6. return a JPG image
+A real WM backend should:
 
-The WM service should be robust to:
-
-- repeated payloads
-- one-sided updates
-- missing `joint_positions_rad`
-- fallback keypoint-only packets
-
-## Heartbeat Behavior
-
-The teleop backend may resend the most recent payload periodically even if no fresh hand update arrives.
-
-Why:
-
-- keeps the observation stream alive
-- avoids frozen image transport when upstream pauses briefly
-
-Implications for the WM service:
-
-- repeated `wm_step` calls may contain identical payloads
-- duplicate processing must be safe
-- rendering the same frame again is acceptable
+1. read both hands from every `wm_step` request
+2. use `joint_transforms_world` as the authoritative pose input when present
+3. treat `keypoints_xyz` as fallback/debug data
+4. treat `joint_positions_rad` as optional auxiliary state
+5. maintain its own world state across requests
+6. return one observation image per request
 
 ## `POST /reset`
 
@@ -468,11 +283,6 @@ The teleop side sends:
 }
 ```
 
-Meaning:
-
-- `true`: reset the WM service state for a fresh episode
-- `false`: soft reset behavior is backend-defined, but the teleop client supports it
-
 ### Response
 
 Preferred response:
@@ -484,11 +294,7 @@ Optional state return:
 
 - header `X-WM-State` containing a JSON object
 
-Allowed alternative:
-
-- JSON response containing an image plus state
-
-The teleop client accepts these JSON image keys:
+Allowed JSON image keys if returning JSON instead of raw bytes:
 
 - `obs_jpg`
 - `observation_jpg`
@@ -497,11 +303,7 @@ The teleop client accepts these JSON image keys:
 - `jpg`
 - `image`
 
-The image may be:
-
-- raw bytes in an HTTP binary response
-- base64 string in JSON
-- byte array encoded as a JSON integer list
+The teleop side also accepts a base64 string response for the image.
 
 ## `POST /wm_step` Response
 
@@ -510,69 +312,31 @@ Preferred response:
 - raw JPG bytes
 - `Content-Type: image/jpeg`
 
-The teleop side decodes that JPG and publishes it as the observation stream.
+Also accepted:
 
-If you return JSON instead, include the observation image under one of the accepted keys listed above.
+- JSON object containing an image under one of the accepted keys above
+- JSON string that is directly a base64-encoded image
+- plain-text base64 image body
 
-## State Returned By `/reset`
-
-If your backend wants to return state metadata, use a JSON object.
-
-The teleop side stores it as an opaque mapping.
-
-Recognized practical patterns include:
-
-```json
-{
-  "left_joint_state": [...],
-  "right_joint_state": [...],
-  "episode_id": "...",
-  "seed": 123
-}
-```
-
-The teleop side may read joint-state-like keys if present, but otherwise treats the mapping as backend-defined state.
+The teleop side decodes the image and publishes it as the observation stream.
 
 ## Robustness Requirements
 
-A production WM backend should handle these cases:
+A production WM backend should tolerate:
 
-1. `joint_transforms_world` present, `joint_positions_rad` absent
-2. only one hand updating for several frames
-3. repeated identical timestamps
-4. repeated identical payloads
-5. temporary fallback to `vr_keypoints`
-6. malformed or missing optional fields
+- repeated snapshots
+- repeated timestamps
+- one hand updating while the other stays unchanged
+- one side being `null`
+- missing `joint_positions_rad`
+- fallback packets that do not include `joint_transforms_world`
 
-Recommended behavior:
+## Backward Compatibility Note
 
-- validate required fields
-- ignore unknown extra fields
-- tolerate optional fields being absent
-- keep internal per-hand state across requests
-
-## Recommended Backend Input Priority
-
-If multiple pose-related fields are present, use this priority:
-
-1. `joint_transforms_world`
-2. `keypoints_xyz`
-3. `joint_positions_rad`
-
-That ordering matches the intended meaning of the data.
-
-## Minimal Correct Backend Assumption
-
-If you want the simplest correct assumption set for implementation, use this:
-
-- every `wm_step` request is JSON
-- `joint_transforms_world` is the main signal when present
-- transforms are world-frame absolute `4 x 4` poses
-- the service should keep state across calls
-- the service returns a JPG observation every step
+The dummy WM server currently still accepts the older single-hand payload for debugging, but the canonical contract for new backend development is the two-hand snapshot schema described above.
 
 ## Reference Files
 
 - [ego_dex_wm_client.py](/scratch/zh2025/ICL_video_gen/data/beavr-bot/src/beavr/teleop/components/interface/robots/ego_dex_wm_client.py)
 - [ego_dex_remote_wm_backend.py](/scratch/zh2025/ICL_video_gen/data/beavr-bot/src/beavr/teleop/components/interface/robots/ego_dex_remote_wm_backend.py)
-- [oculus.py](/scratch/zh2025/ICL_video_gen/data/beavr-bot/src/beavr/teleop/components/detector/vr/oculus.py)
+- [ego_dex_dummy_wm_server.py](/scratch/zh2025/ICL_video_gen/data/beavr-bot/src/beavr/teleop/components/interface/robots/ego_dex_dummy_wm_server.py)
