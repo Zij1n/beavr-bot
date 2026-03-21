@@ -648,7 +648,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             client_address=str(self.client_address[0]),
         )
 
-        if self.path == "/wm_step":
+        if self.path in {"/step", "/wm_step"}:
             try:
                 jpg_bytes = self.server.wm_server.wm_step(payload)
             except Exception as exc:

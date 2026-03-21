@@ -26,9 +26,9 @@ The teleop process keeps the latest:
 - left-hand action
 - right-hand action
 
-Then it calls `wm_step` at a fixed rate of **15 Hz**.
+Then it calls `step` at a fixed rate of **2 Hz**.
 
-Each `wm_step` call sends a **two-hand snapshot payload** containing the latest known state for both hands.
+Each `step` call sends a **two-hand snapshot payload** containing the latest known state for both hands.
 
 This is the canonical WM contract.
 
@@ -36,7 +36,7 @@ This is the canonical WM contract.
 
 The teleop side calls:
 
-- `POST /wm_step`
+- `POST /step`
 - `POST /reset`
 
 Reference files:
@@ -52,16 +52,16 @@ Preferred response content type:
 
 - `image/jpeg`
 
-## `POST /wm_step`
+## `POST /step`
 
 ### Request Frequency
 
-The teleop side sends one snapshot every `1/15` second by default.
+The teleop side sends one snapshot every `1/2` second by default.
 
 Important:
 
-- `wm_step` is no longer a one-hand trigger event
-- `wm_step` is a periodic two-hand snapshot
+- `step` is no longer a one-hand trigger event
+- `step` is a periodic two-hand snapshot
 - one or both hands may still contain `null` fields if data has not been observed yet
 
 ### Canonical Request Schema
@@ -264,7 +264,7 @@ Practical guidance:
 
 A real WM backend should:
 
-1. read both hands from every `wm_step` request
+1. read both hands from every `step` request
 2. use `joint_transforms_world` as the authoritative pose input when present
 3. treat `keypoints_xyz` as fallback/debug data
 4. treat `joint_positions_rad` as optional auxiliary state
@@ -305,7 +305,7 @@ Allowed JSON image keys if returning JSON instead of raw bytes:
 
 The teleop side also accepts a base64 string response for the image.
 
-## `POST /wm_step` Response
+## `POST /step` Response
 
 Preferred response:
 

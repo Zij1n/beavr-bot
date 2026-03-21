@@ -300,6 +300,32 @@ class EgoDexRobot(Component):
             return cv2.cvtColor(frame_array, cv2.COLOR_BGRA2BGR)
         return None
 
+    def _pad_frame_to_output_size(self, frame: np.ndarray) -> np.ndarray:
+        target_width = self._image_width
+        target_height = self._image_height
+        source_height, source_width = frame.shape[:2]
+
+        if source_width <= 0 or source_height <= 0:
+            return self._build_placeholder_frame()
+        if source_width == target_width and source_height == target_height:
+            return frame
+
+        canvas = np.full((target_height, target_width, 3), 18, dtype=np.uint8)
+
+        copy_width = min(source_width, target_width)
+        copy_height = min(source_height, target_height)
+
+        src_x0 = max((source_width - target_width) // 2, 0)
+        src_y0 = max((source_height - target_height) // 2, 0)
+        dst_x0 = max((target_width - source_width) // 2, 0)
+        dst_y0 = max((target_height - source_height) // 2, 0)
+
+        canvas[dst_y0 : dst_y0 + copy_height, dst_x0 : dst_x0 + copy_width] = frame[
+            src_y0 : src_y0 + copy_height,
+            src_x0 : src_x0 + copy_width,
+        ]
+        return canvas
+
     def _publish_observation(self) -> None:
         try:
             backend_frame = self._backend.get_camera_frame()
@@ -319,6 +345,8 @@ class EgoDexRobot(Component):
                     logger.warning("Backend frame shape is invalid; publishing placeholder.")
                     self._warned_invalid_backend_frame = True
                 frame = self._build_placeholder_frame()
+            else:
+                frame = self._pad_frame_to_output_size(frame)
 
         self._camera_tx.send_image(frame)
 

@@ -114,7 +114,7 @@ class EgoDexRobotCfg:
     wm_hostname: str = "127.0.0.1"
     wm_port: int = 18080
     wm_timeout_s: float = 3.0
-    wm_heartbeat_hz: float = 15.0
+    wm_heartbeat_hz: float = 2.0
 
     def build(self):
         wm_host = os.getenv("EGO_DEX_WM_HOST", self.wm_hostname)
@@ -126,6 +126,7 @@ class EgoDexRobotCfg:
             wm_client=WMClient(hostname=wm_host, port=wm_port, timeout_s=wm_timeout_s),
             dof=self.dof,
             heartbeat_hz=wm_heartbeat_hz,
+            reset_frame_dir=self.log_dir,
         )
 
         return EgoDexRobot(

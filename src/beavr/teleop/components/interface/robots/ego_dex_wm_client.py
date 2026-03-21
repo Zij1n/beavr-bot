@@ -74,7 +74,7 @@ class WMClient:
         raise ValueError("WM response payload does not include an observation image.")
 
     def wm_step(self, payload: Mapping[str, Any]) -> bytes:
-        response = self._post_json("/wm_step", payload)
+        response = self._post_json("/step", payload)
         if response.content_type in {"image/jpeg", "image/jpg", "application/octet-stream"}:
             return response.body
         if response.content_type == "application/json":
@@ -83,10 +83,10 @@ class WMClient:
                 return self._extract_observation_bytes(decoded)
             if isinstance(decoded, str):
                 return self._decode_base64_image(decoded)
-            raise ValueError("WM /wm_step JSON response must be an object or base64 string.")
+            raise ValueError("WM /step JSON response must be an object or base64 string.")
         if response.content_type in {"text/plain", "text/html"}:
             return self._decode_base64_image(response.body.decode("utf-8"))
-        raise ValueError(f"Unsupported WM /wm_step response type: {response.content_type}")
+        raise ValueError(f"Unsupported WM /step response type: {response.content_type}")
 
     def reset(self, new: bool) -> Tuple[bytes, Mapping[str, Any]]:
         response = self._post_json("/reset", {"new": bool(new)})

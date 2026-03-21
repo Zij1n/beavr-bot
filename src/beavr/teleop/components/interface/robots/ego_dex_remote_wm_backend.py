@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Tuple
@@ -29,8 +30,9 @@ class RemoteEgoDexWMBackend:
         self,
         wm_client: WMClient,
         dof: int = 16,
-        heartbeat_hz: float = 15.0,
+        heartbeat_hz: float = 2.0,
         bootstrap_reset: bool = True,
+        reset_frame_dir: Optional[str] = None,
     ):
         self._wm_client = wm_client
         self._dof = int(dof)
@@ -46,6 +48,9 @@ class RemoteEgoDexWMBackend:
             robots.LEFT: {},
             robots.RIGHT: {},
         }
+        self._reset_frame_dir = str(reset_frame_dir) if reset_frame_dir else None
+        if self._reset_frame_dir is not None:
+            os.makedirs(self._reset_frame_dir, exist_ok=True)
 
         if bootstrap_reset:
             try:
@@ -196,16 +201,30 @@ class RemoteEgoDexWMBackend:
             payload["world_frame"] = next(iter(world_frames))
         return payload
 
+    def _write_reset_frame(self, obs_jpg: bytes, *, new: bool) -> Optional[str]:
+        if not obs_jpg or self._reset_frame_dir is None:
+            return None
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(
+            self._reset_frame_dir,
+            f"ego_dex_wm_reset_new_{str(bool(new)).lower()}_{timestamp}.jpg",
+        )
+        with open(path, "wb") as file_obj:
+            file_obj.write(obs_jpg)
+        return path
+
     def reset(self, new: bool = True) -> Tuple[Optional[np.ndarray], Mapping[str, Any]]:
         obs_jpg, state = self._wm_client.reset(new=new)
         self._latest_state = state
         self._latest_obs_frame = self._decode_jpg(obs_jpg)
         self._last_obs_wall_time_s = time.time()
+        reset_frame_path = self._write_reset_frame(obs_jpg, new=bool(new))
         self._last_event_record = {
             "event": "remote_wm_reset",
             "received_at_s": self._last_obs_wall_time_s,
             "new": bool(new),
             "state_keys": sorted(state.keys()),
+            "reset_frame_path": reset_frame_path,
         }
         return self._latest_obs_frame, self._latest_state
 

@@ -164,7 +164,7 @@ It should be the only place that knows how to communicate with the remote servic
 
 Responsibilities:
 
-- send `wm_step` requests
+- send `step` requests
 - send `reset` requests
 - parse supported response forms
 - return raw JPG bytes and a JSON-like state mapping
@@ -185,7 +185,7 @@ It behaves like a minimal world-model server so the rest of the pipeline can be 
 
 Responsibilities:
 
-- serve `POST /wm_step`
+- serve `POST /step`
 - serve `POST /reset`
 - serve `GET /health`
 - accept the same payload schema that the real backend will receive
@@ -298,7 +298,7 @@ The default HTTP implementation may support either raw-image responses or JSON-w
 
 ### 7.4 WMServer API contract
 
-#### `POST /wm_step`
+#### `POST /step`
 
 Request body:
 
@@ -595,7 +595,7 @@ When replacing the dummy WMServer with a real service, the preferred path is:
 1. keep `ego_dex_robot.py` unchanged
 2. keep `ego_dex_remote_wm_backend.py` unchanged
 3. replace or extend `WMClient` in `ego_dex_wm_client.py`
-4. make the real service honor the same `wm_step` and `reset` contract
+4. make the real service honor the same `step` and `reset` contract
 
 That keeps the teleop-side integration stable while letting the backend transport or service implementation evolve independently.
 
