@@ -111,22 +111,75 @@ class EgoDexRobotCfg:
     image_height: int = 720
     log_dir: str = "logs"
     log_prefix: str = "ego_dex"
+    backend_cli_host: str = "127.0.0.1"
+    backend_cli_command_port: int = ports.EGO_DEX_BACKEND_CLI_COMMAND_PORT
+    backend_cli_status_port: int = ports.EGO_DEX_BACKEND_CLI_STATUS_PORT
+    wm_scheme: str = "http"
     wm_hostname: str = "127.0.0.1"
     wm_port: int = 18080
     wm_timeout_s: float = 3.0
     wm_heartbeat_hz: float = 2.0
+    step_distance_threshold: float = 0.22577618051049414
+    hand_visualization_bind_host: str = "0.0.0.0"
+    hand_visualization_port: int = 15102
+    hand_visualization_fps: float = 15.0
+    hand_visualization_point_size: float = 0.015
 
     def build(self):
+        wm_scheme = os.getenv("EGO_DEX_WM_SCHEME", self.wm_scheme)
         wm_host = os.getenv("EGO_DEX_WM_HOST", self.wm_hostname)
         wm_port = int(os.getenv("EGO_DEX_WM_PORT", str(self.wm_port)))
         wm_timeout_s = float(os.getenv("EGO_DEX_WM_TIMEOUT_S", str(self.wm_timeout_s)))
         wm_heartbeat_hz = float(os.getenv("EGO_DEX_WM_HEARTBEAT_HZ", str(self.wm_heartbeat_hz)))
+        backend_cli_host = os.getenv("EGO_DEX_BACKEND_CLI_HOST", self.backend_cli_host)
+        backend_cli_command_port = int(
+            os.getenv("EGO_DEX_BACKEND_CLI_COMMAND_PORT", str(self.backend_cli_command_port))
+        )
+        backend_cli_status_port = int(
+            os.getenv("EGO_DEX_BACKEND_CLI_STATUS_PORT", str(self.backend_cli_status_port))
+        )
+        step_distance_threshold = float(
+            os.getenv("EGO_DEX_STEP_DISTANCE_THRESHOLD", str(self.step_distance_threshold))
+        )
+        hand_visualization_enabled = os.getenv(
+            "EGO_DEX_VISUALIZE_HANDS_ENABLE",
+            os.getenv("EGO_DEX_FEATHER_ENABLE", "0"),
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        hand_visualization_bind_host = os.getenv(
+            "EGO_DEX_VISUALIZE_HANDS_BIND_HOST",
+            os.getenv("EGO_DEX_FEATHER_BIND_HOST", self.hand_visualization_bind_host),
+        )
+        hand_visualization_port = int(
+            os.getenv(
+                "EGO_DEX_VISUALIZE_HANDS_PORT",
+                os.getenv("EGO_DEX_FEATHER_PORT", str(self.hand_visualization_port)),
+            )
+        )
+        hand_visualization_fps = float(
+            os.getenv(
+                "EGO_DEX_VISUALIZE_HANDS_FPS",
+                os.getenv("EGO_DEX_FEATHER_FPS", str(self.hand_visualization_fps)),
+            )
+        )
+        hand_visualization_point_size = float(
+            os.getenv(
+                "EGO_DEX_VISUALIZE_HANDS_POINT_SIZE",
+                os.getenv("EGO_DEX_FEATHER_POINT_SIZE", str(self.hand_visualization_point_size)),
+            )
+        )
 
         backend = RemoteEgoDexWMBackend(
-            wm_client=WMClient(hostname=wm_host, port=wm_port, timeout_s=wm_timeout_s),
+            wm_client=WMClient(hostname=wm_host, port=wm_port, timeout_s=wm_timeout_s, scheme=wm_scheme),
             dof=self.dof,
             heartbeat_hz=wm_heartbeat_hz,
             reset_frame_dir=self.log_dir,
+            step_distance_threshold=step_distance_threshold,
+            hand_visualization_bind_host=(
+                hand_visualization_bind_host if hand_visualization_enabled else None
+            ),
+            hand_visualization_port=hand_visualization_port if hand_visualization_enabled else None,
+            hand_visualization_fps=hand_visualization_fps,
+            hand_visualization_point_size=hand_visualization_point_size,
         )
 
         return EgoDexRobot(
@@ -146,6 +199,9 @@ class EgoDexRobotCfg:
             image_height=self.image_height,
             log_dir=self.log_dir,
             log_prefix=self.log_prefix,
+            backend_cli_host=backend_cli_host,
+            backend_cli_command_port=backend_cli_command_port,
+            backend_cli_status_port=backend_cli_status_port,
         )
 
 

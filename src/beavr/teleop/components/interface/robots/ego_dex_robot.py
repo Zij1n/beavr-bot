@@ -7,12 +7,14 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+import zmq
 
 from beavr.teleop.common.network.publisher import (
     ZMQCompressedImageTransmitter,
     ZMQPublisherManager,
 )
 from beavr.teleop.common.network.subscriber import ZMQSubscriber
+from beavr.teleop.common.network.utils import get_global_context
 from beavr.teleop.components import Component
 from beavr.teleop.components.detector.detector_types import InputFrame
 from beavr.teleop.components.interface.robots.ego_dex_remote_wm_backend import RobotActionCommand
@@ -130,6 +132,9 @@ class EgoDexRobot(Component):
         image_height: int = 720,
         log_dir: str = "logs",
         log_prefix: str = "ego_dex",
+        backend_cli_host: str = "127.0.0.1",
+        backend_cli_command_port: int = 8122,
+        backend_cli_status_port: int = 8123,
     ):
         self.notify_component_start("ego_dex robot")
 
@@ -145,6 +150,22 @@ class EgoDexRobot(Component):
 
         self._publisher = ZMQPublisherManager.get_instance()
         self._camera_tx = ZMQCompressedImageTransmitter(host=host, port=camera_publish_port)
+        self._zmq_context = get_global_context()
+        self._backend_cli_host = backend_cli_host
+        self._backend_cli_command_port = int(backend_cli_command_port)
+        self._backend_cli_status_port = int(backend_cli_status_port)
+        self._backend_cli_command_socket = self._zmq_context.socket(zmq.REP)
+        self._backend_cli_command_socket.setsockopt(zmq.LINGER, 0)
+        self._backend_cli_command_socket.setsockopt(zmq.RCVHWM, 1)
+        self._backend_cli_command_socket.bind(
+            f"tcp://{self._backend_cli_host}:{self._backend_cli_command_port}"
+        )
+        self._backend_cli_status_socket = self._zmq_context.socket(zmq.PUB)
+        self._backend_cli_status_socket.setsockopt(zmq.LINGER, 0)
+        self._backend_cli_status_socket.setsockopt(zmq.SNDHWM, 1)
+        self._backend_cli_status_socket.bind(
+            f"tcp://{self._backend_cli_host}:{self._backend_cli_status_port}"
+        )
 
         self._enabled_sides: list[str] = []
         self._action_subscribers: Dict[str, ZMQSubscriber] = {}
@@ -186,6 +207,80 @@ class EgoDexRobot(Component):
 
         self._action_decoder = ActionDecoder(self._enabled_sides)
         self._logger = EgoDexSessionLogger(log_dir=log_dir, log_prefix=log_prefix)
+
+    def _build_backend_cli_status(self, *, ok: bool = True, handled: Optional[str] = None, error: Optional[str] = None) -> dict:
+        gate_status = {}
+        if hasattr(self._backend, "get_gate_status"):
+            try:
+                gate_status = dict(self._backend.get_gate_status())
+            except Exception:
+                logger.exception("Failed to read backend gate status")
+        status = {
+            "ok": bool(ok),
+            "handled": handled,
+            "error": error,
+            "timestamp_s": time.time(),
+        }
+        status.update(gate_status)
+        return status
+
+    def _publish_backend_cli_status(self) -> None:
+        try:
+            self._backend_cli_status_socket.send_json(self._build_backend_cli_status(), flags=zmq.NOBLOCK)
+        except zmq.Again:
+            pass
+        except Exception:
+            logger.exception("Failed to publish backend CLI status")
+
+    def _poll_backend_cli_commands(self) -> None:
+        while True:
+            try:
+                request = self._backend_cli_command_socket.recv_json(flags=zmq.NOBLOCK)
+            except zmq.Again:
+                return
+            except Exception:
+                logger.exception("Failed to receive backend CLI command")
+                return
+
+            response = self._build_backend_cli_status(ok=False, error="invalid command")
+            try:
+                if not isinstance(request, dict):
+                    response = self._build_backend_cli_status(ok=False, error="request must be a JSON object")
+                else:
+                    command = str(request.get("command", "")).strip().lower()
+                    if command == "reset":
+                        self._backend.reset(new=True)
+                        pose_record = self._backend.pop_pose_record()
+                        if pose_record is not None:
+                            self._logger.log(pose_record)
+                        response = self._build_backend_cli_status(ok=True, handled="reset")
+                    elif command == "thr":
+                        raw_value = request.get("value")
+                        if raw_value is None:
+                            response = self._build_backend_cli_status(
+                                ok=False,
+                                error="thr requires a numeric value",
+                            )
+                        else:
+                            threshold_value = self._backend.set_step_distance_threshold(float(raw_value))
+                            response = self._build_backend_cli_status(ok=True, handled="thr")
+                            response["step_distance_threshold"] = threshold_value
+                    elif command in {"status", "ping"}:
+                        response = self._build_backend_cli_status(ok=True, handled=command)
+                    else:
+                        response = self._build_backend_cli_status(
+                            ok=False,
+                            error=f"unsupported command: {command or '<empty>'}",
+                        )
+            except Exception as exc:
+                logger.exception("Failed to handle backend CLI command")
+                response = self._build_backend_cli_status(ok=False, error=str(exc))
+
+            try:
+                self._backend_cli_command_socket.send_json(response)
+            except Exception:
+                logger.exception("Failed to reply to backend CLI command")
+                return
 
     def _sanitize_joint_state(self, state: Optional[np.ndarray]) -> np.ndarray:
         if state is None:
@@ -351,6 +446,7 @@ class EgoDexRobot(Component):
         self._camera_tx.send_image(frame)
 
     def step(self) -> None:
+        self._poll_backend_cli_commands()
         self._poll_actions()
         self._poll_keypoints()
         try:
@@ -364,6 +460,7 @@ class EgoDexRobot(Component):
             pose_record = None
         if pose_record is not None:
             self._logger.log(pose_record)
+        self._publish_backend_cli_status()
         self._publish_joint_states()
         self._publish_observation()
 

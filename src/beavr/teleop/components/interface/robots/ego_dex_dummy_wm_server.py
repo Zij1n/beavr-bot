@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import os
+import random
 import sys
 import threading
 import time
@@ -605,6 +607,7 @@ class DummyWMServer:
         height: int = 720,
         payload_log_dir: str = "logs/dummy_wm_server",
         feather_publisher: Optional[FeatherTrajectoryPublisher] = None,
+        reset_pose_jsonl_path: Optional[str] = None,
     ):
         self._dof = int(dof)
         self._width = int(width)
@@ -623,6 +626,12 @@ class DummyWMServer:
         self._world_frame_by_side: Dict[str, Optional[str]] = {robots.LEFT: None, robots.RIGHT: None}
         self._last_reset_s = time.time()
         self._step_count = 0
+        self._reset_pose_jsonl_path = str(reset_pose_jsonl_path) if reset_pose_jsonl_path else None
+        self._reset_step_snapshots = (
+            self._load_reset_step_snapshots(self._reset_pose_jsonl_path)
+            if self._reset_pose_jsonl_path is not None
+            else []
+        )
         os.makedirs(payload_log_dir, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         self._payload_log_path = os.path.join(payload_log_dir, f"dummy_wm_payloads_{timestamp}.jsonl")
@@ -838,6 +847,79 @@ class DummyWMServer:
             )
             y += 22
 
+    @staticmethod
+    def _flip_keypoints_z(keypoints_xyz: Any) -> Any:
+        if keypoints_xyz is None:
+            return None
+        keypoints = np.asarray(keypoints_xyz, dtype=np.float32)
+        if keypoints.ndim != 2 or keypoints.shape[1] != 3:
+            return keypoints_xyz
+        flipped = keypoints.copy()
+        flipped[:, 2] *= -1.0
+        return flipped.tolist()
+
+    def _record_to_reset_step_snapshot(self, record: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+        hands = record.get("hands")
+        if not isinstance(hands, Mapping):
+            return None
+
+        snapshot_hands: dict[str, Any] = {}
+        for side in (robots.LEFT, robots.RIGHT):
+            hand_payload = hands.get(side)
+            if not isinstance(hand_payload, Mapping):
+                continue
+            snapshot_hand: dict[str, Any] = {
+                "source": hand_payload.get("source", "jsonl_reset_seed"),
+                "timestamp_s": hand_payload.get("timestamp_s", record.get("timestamp_s")),
+                "is_relative": bool(hand_payload.get("is_relative", False)),
+                "world_frame": hand_payload.get("world_frame", record.get("world_frame")),
+                "joint_order": hand_payload.get("joint_order"),
+                "keypoints_xyz": hand_payload.get("keypoints_xyz"),
+                "joint_positions_rad": hand_payload.get("joint_positions_rad"),
+                "action_timestamp_s": hand_payload.get("action_timestamp_s"),
+            }
+            joint_transforms_world = hand_payload.get("joint_transforms_world")
+            if isinstance(joint_transforms_world, Mapping):
+                snapshot_hand["joint_transforms_world"] = {
+                    str(joint_name): np.asarray(transform, dtype=np.float32).tolist()
+                    for joint_name, transform in joint_transforms_world.items()
+                    if np.asarray(transform, dtype=np.float32).shape == (4, 4)
+                }
+            snapshot_hands[side] = snapshot_hand
+
+        if not snapshot_hands:
+            return None
+
+        snapshot = {
+            "source": "reset_seed_jsonl",
+            "timestamp_s": record.get("timestamp_s", time.time()),
+            "hands": snapshot_hands,
+        }
+        world_frame = record.get("world_frame")
+        if isinstance(world_frame, str):
+            snapshot["world_frame"] = world_frame
+        return snapshot
+
+    def _load_reset_step_snapshots(self, trajectory_jsonl_path: str) -> list[dict[str, Any]]:
+        snapshots: list[dict[str, Any]] = []
+        with open(trajectory_jsonl_path, "r", encoding="utf-8") as file_obj:
+            for line in file_obj:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                record = json.loads(stripped)
+                snapshot = self._record_to_reset_step_snapshot(record)
+                if snapshot is not None:
+                    snapshots.append(snapshot)
+        if not snapshots:
+            raise ValueError(f"No usable reset poses found in JSONL: {trajectory_jsonl_path}")
+        return snapshots
+
+    def _sample_reset_step_snapshot(self) -> Optional[dict[str, Any]]:
+        if not self._reset_step_snapshots:
+            return None
+        return copy.deepcopy(random.choice(self._reset_step_snapshots))
+
     def _render(self) -> np.ndarray:
         frame = self._renderer.render(
             joint_transforms_world_by_side=self._latest_joint_transforms_world,
@@ -886,8 +968,18 @@ class DummyWMServer:
             self._latest_source = {robots.LEFT: "none", robots.RIGHT: "none"}
             self._world_frame_by_side = {robots.LEFT: None, robots.RIGHT: None}
             self._step_count = 0
+        reset_snapshot = self._sample_reset_step_snapshot()
+        if reset_snapshot is not None:
+            self._apply_snapshot_payload(reset_snapshot)
         self._last_reset_s = time.time()
-        return self._encode_jpg(self._render()), self._state_dict()
+        state = self._state_dict()
+        if reset_snapshot is not None:
+            state["hands"] = copy.deepcopy(reset_snapshot.get("hands", {}))
+            if "timestamp_s" in reset_snapshot:
+                state["timestamp_s"] = reset_snapshot.get("timestamp_s")
+            if "world_frame" in reset_snapshot:
+                state["world_frame"] = reset_snapshot.get("world_frame")
+        return self._encode_jpg(self._render()), state
 
     def health(self) -> Dict[str, Any]:
         return {
@@ -1022,6 +1114,11 @@ def main() -> None:
     parser.add_argument("--dof", type=int, default=16)
     parser.add_argument("--payload-log-dir", default="logs/dummy_wm_server")
     parser.add_argument(
+        "--reset-pose-jsonl",
+        default=None,
+        help="Optional JSONL trajectory used to seed `/reset` with a random step-space hand pose.",
+    )
+    parser.add_argument(
         "--feather-trajectory-jsonl",
         default=None,
         help="Optional JSONL trajectory to stream into the Unity feather debug overlay.",
@@ -1059,6 +1156,7 @@ def main() -> None:
         height=args.height,
         payload_log_dir=args.payload_log_dir,
         feather_publisher=feather_publisher,
+        reset_pose_jsonl_path=args.reset_pose_jsonl,
     )
     http_server = _DummyWMHTTPServer((args.host, args.port), _RequestHandler, wm_server)
     print(f"Dummy WM server listening on http://{args.host}:{args.port}")
