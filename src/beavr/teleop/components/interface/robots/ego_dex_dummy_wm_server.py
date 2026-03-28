@@ -4,14 +4,18 @@ import argparse
 import json
 import math
 import os
-import time
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+try:
+    import zmq
+except ImportError:  # pragma: no cover - optional until feather debug is enabled
+    zmq = None
 
 from beavr.teleop.configs.constants import robots
 
@@ -88,6 +92,18 @@ SIDE_COLORS = {
         "joint": (120, 220, 255),
     },
 }
+
+FEATHER_SIDE_COLORS = {
+    robots.LEFT: (1.0, 0.74, 0.28, 0.95),
+    robots.RIGHT: (0.34, 0.78, 1.0, 0.95),
+}
+FEATHER_LIVE_SIDE_COLORS = {
+    robots.LEFT: (1.0, 0.22, 0.22, 0.98),
+    robots.RIGHT: (1.0, 0.22, 0.22, 0.98),
+}
+FEATHER_VERTICAL_OFFSET_Y_M = 0.10
+
+_FLIP_Z_4X4 = np.diag([1.0, 1.0, -1.0, 1.0]).astype(np.float32)
 
 
 class _MinimalPoseRenderer:
@@ -278,6 +294,307 @@ def _is_placeholder_transform(transform: np.ndarray) -> bool:
     )
 
 
+def _flip_transform_z(transform: np.ndarray) -> np.ndarray:
+    return _FLIP_Z_4X4 @ transform @ _FLIP_Z_4X4
+
+
+def _make_feather_point(
+    position: np.ndarray,
+    color: Tuple[float, float, float, float],
+    size: float,
+) -> dict[str, Any]:
+    shifted_position = np.asarray(position, dtype=np.float32).copy()
+    shifted_position[1] += FEATHER_VERTICAL_OFFSET_Y_M
+    return {
+        "position": {
+            "x": float(shifted_position[0]),
+            "y": float(shifted_position[1]),
+            "z": float(shifted_position[2]),
+        },
+        "color": {
+            "r": float(color[0]),
+            "g": float(color[1]),
+            "b": float(color[2]),
+            "a": float(color[3]),
+        },
+        "size": float(size),
+    }
+
+
+def _hand_payload_to_feather_points(
+    *,
+    side: str,
+    hand_payload: Mapping[str, Any],
+    point_size: float,
+    color_by_side: Mapping[str, Tuple[float, float, float, float]] = FEATHER_SIDE_COLORS,
+) -> list[dict[str, Any]]:
+    joint_transforms_world = hand_payload.get("joint_transforms_world")
+    if isinstance(joint_transforms_world, Mapping):
+        joint_order = hand_payload.get("joint_order")
+        order = (
+            tuple(str(joint_name) for joint_name in joint_order)
+            if isinstance(joint_order, Sequence)
+            else HAND_JOINT_ORDER
+        )
+        points = []
+        color = color_by_side[side]
+        for joint_name in order:
+            raw_transform = joint_transforms_world.get(joint_name)
+            if raw_transform is None:
+                continue
+            transform = np.asarray(raw_transform, dtype=np.float32)
+            if transform.shape != (4, 4) or not np.isfinite(transform).all():
+                continue
+            if _is_placeholder_transform(transform):
+                continue
+            tracking_space_transform = _flip_transform_z(transform)
+            position = tracking_space_transform[:3, 3].astype(np.float32)
+            points.append(
+                _make_feather_point(
+                    position=position,
+                    color=color,
+                    size=point_size if joint_name not in {"wrist", "palm"} else point_size * 1.2,
+                )
+            )
+        if points:
+            return points
+
+    keypoints_xyz = hand_payload.get("keypoints_xyz")
+    if keypoints_xyz is None:
+        return []
+    keypoints = np.asarray(keypoints_xyz, dtype=np.float32)
+    if keypoints.ndim == 2 and keypoints.shape[1] == 3:
+        tracking_space_keypoints = keypoints.copy()
+        tracking_space_keypoints[:, 2] *= -1.0
+        color = color_by_side[side]
+        return [
+            _make_feather_point(position=point, color=color, size=point_size)
+            for point in tracking_space_keypoints
+            if np.isfinite(point).all()
+        ]
+
+    return []
+
+
+def _payload_to_feather_points(
+    payload: Mapping[str, Any],
+    *,
+    point_size: float,
+    color_by_side: Mapping[str, Tuple[float, float, float, float]] = FEATHER_SIDE_COLORS,
+) -> list[dict[str, Any]]:
+    hands = payload.get("hands")
+    if not isinstance(hands, Mapping):
+        return []
+
+    points: list[dict[str, Any]] = []
+    for side in (robots.LEFT, robots.RIGHT):
+        hand_payload = hands.get(side)
+        if not isinstance(hand_payload, Mapping):
+            continue
+        points.extend(
+                _hand_payload_to_feather_points(
+                    side=side,
+                    hand_payload=hand_payload,
+                    point_size=point_size,
+                    color_by_side=color_by_side,
+                )
+            )
+    return points
+
+
+class FeatherTrajectoryPublisher:
+    """Publish a combined feather overlay from looped trajectory frames and live `/step` payloads."""
+
+    def __init__(
+        self,
+        trajectory_jsonl_path: Optional[str] = None,
+        bind_host: str = "0.0.0.0",
+        port: int = 15102,
+        fps: float = 15.0,
+        point_size: float = 0.015,
+        step_payload_enabled: bool = False,
+        live_stale_timeout_s: float = 0.35,
+    ):
+        self._trajectory_jsonl_path = trajectory_jsonl_path
+        self._bind_host = str(bind_host)
+        self._port = int(port)
+        self._fps = max(float(fps), 0.1)
+        self._point_size = max(float(point_size), 1e-4)
+        self._step_payload_enabled = bool(step_payload_enabled)
+        self._live_stale_timeout_s = max(float(live_stale_timeout_s), 0.0)
+        self._sequence = 0
+        self._frames = (
+            self._load_frames(trajectory_jsonl_path)
+            if trajectory_jsonl_path is not None
+            else []
+        )
+        self._latest_step_points: list[dict[str, Any]] = []
+        self._latest_step_update_s: Optional[float] = None
+        self._state_lock = threading.Lock()
+        self._context: Optional[zmq.Context] = None
+        self._socket: Optional[zmq.Socket] = None
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    @property
+    def bind_address(self) -> str:
+        return f"tcp://{self._bind_host}:{self._port}"
+
+    @property
+    def source_path(self) -> Optional[str]:
+        return self._trajectory_jsonl_path
+
+    @property
+    def frame_count(self) -> int:
+        return len(self._frames)
+
+    @property
+    def fps(self) -> float:
+        return self._fps
+
+    @property
+    def trajectory_enabled(self) -> bool:
+        return self._trajectory_jsonl_path is not None
+
+    @property
+    def step_payload_enabled(self) -> bool:
+        return self._step_payload_enabled
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        if zmq is None:
+            raise RuntimeError(
+                "pyzmq is required for feather debug streaming. Install the teleop dependencies first."
+            )
+
+        self._context = zmq.Context()
+        self._socket = self._context.socket(zmq.PUB)
+        self._socket.setsockopt(zmq.LINGER, 0)
+        self._socket.setsockopt(zmq.SNDHWM, 8)
+        self._socket.bind(self.bind_address)
+
+        self._thread = threading.Thread(
+            target=self._publish_loop,
+            name="FeatherTrajectoryPublisher",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop_event.set()
+
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+
+        if self._socket is not None:
+            self._socket.close(linger=0)
+            self._socket = None
+        if self._context is not None:
+            self._context.term()
+            self._context = None
+
+    def publish_step_payload(self, payload: Mapping[str, Any]) -> None:
+        if not self._step_payload_enabled:
+            return
+        points = _payload_to_feather_points(
+            payload,
+            point_size=self._point_size,
+            color_by_side=FEATHER_LIVE_SIDE_COLORS,
+        )
+        with self._state_lock:
+            self._latest_step_points = points
+            self._latest_step_update_s = time.monotonic() if points else None
+
+
+    def _publish_loop(self) -> None:
+        if self._socket is None:
+            return
+
+        # Allow subscribers time to connect before the first payload.
+        time.sleep(0.25)
+        period_s = 1.0 / self._fps
+        frame_index = 0
+
+        while not self._stop_event.is_set():
+            tick_start_s = time.perf_counter()
+            now_s = time.monotonic()
+            points: list[dict[str, Any]] = []
+
+            if self._frames:
+                points.extend(self._frames[frame_index]["points"])
+                frame_index = (frame_index + 1) % len(self._frames)
+
+            if self._step_payload_enabled:
+                with self._state_lock:
+                    latest_step_points = list(self._latest_step_points)
+                    latest_step_update_s = self._latest_step_update_s
+                if (
+                    latest_step_update_s is not None
+                    and now_s - latest_step_update_s <= self._live_stale_timeout_s
+                ):
+                    points.extend(latest_step_points)
+
+            if points:
+                payload = {
+                    "frame": "tracking_space",
+                    "sequence": self._sequence,
+                    "points": points,
+                }
+                self._socket.send_string(json.dumps(payload, separators=(",", ":")))
+                self._sequence += 1
+
+            sleep_s = period_s - (time.perf_counter() - tick_start_s)
+            if sleep_s > 0.0:
+                self._stop_event.wait(timeout=sleep_s)
+
+    def _load_frames(self, trajectory_jsonl_path: str) -> list[dict[str, Any]]:
+        frames: list[dict[str, Any]] = []
+        with open(trajectory_jsonl_path, "r", encoding="utf-8") as file_obj:
+            for line in file_obj:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                record = json.loads(stripped)
+                points = self._record_to_points(record)
+                if not points:
+                    continue
+                frames.append(
+                    {
+                        "frame": "tracking_space",
+                        "points": points,
+                    }
+                )
+
+        if not frames:
+            raise ValueError(
+                f"No feather points could be extracted from trajectory file: {trajectory_jsonl_path}"
+            )
+        return frames
+
+    def _record_to_points(self, record: Mapping[str, Any]) -> list[dict[str, Any]]:
+        hands = record.get("hands")
+        if not isinstance(hands, Mapping):
+            return []
+
+        points: list[dict[str, Any]] = []
+        for side in (robots.LEFT, robots.RIGHT):
+            hand_payload = hands.get(side)
+            if not isinstance(hand_payload, Mapping):
+                continue
+            points.extend(
+                _hand_payload_to_feather_points(
+                    side=side,
+                    hand_payload=hand_payload,
+                    point_size=self._point_size,
+                    color_by_side=FEATHER_SIDE_COLORS,
+                )
+            )
+
+        return points
+
+
 class DummyWMServer:
     """Testing WM service that renders world-frame XR hand poses."""
 
@@ -287,11 +604,13 @@ class DummyWMServer:
         width: int = 960,
         height: int = 720,
         payload_log_dir: str = "logs/dummy_wm_server",
+        feather_publisher: Optional[FeatherTrajectoryPublisher] = None,
     ):
         self._dof = int(dof)
         self._width = int(width)
         self._height = int(height)
         self._renderer = _MinimalPoseRenderer(image_width=self._width, image_height=self._height)
+        self._feather_publisher = feather_publisher
         self._right_joint_state = np.zeros(self._dof, dtype=np.float32)
         self._left_joint_state = np.zeros(self._dof, dtype=np.float32)
         self._latest_keypoints: Dict[str, Optional[np.ndarray]] = {robots.LEFT: None, robots.RIGHT: None}
@@ -326,6 +645,8 @@ class DummyWMServer:
             self._payload_log_file.write(json.dumps(record) + "\n")
 
     def close(self) -> None:
+        if self._feather_publisher is not None:
+            self._feather_publisher.close()
         with self._payload_log_lock:
             self._payload_log_file.close()
 
@@ -535,6 +856,8 @@ class DummyWMServer:
         return np.asarray(buffer).tobytes()
 
     def wm_step(self, payload: Mapping[str, Any]) -> bytes:
+        if self._feather_publisher is not None:
+            self._feather_publisher.publish_step_payload(payload)
         if isinstance(payload.get("hands"), Mapping):
             self._apply_snapshot_payload(payload)
         else:
@@ -578,6 +901,27 @@ class DummyWMServer:
             is not None,
             "has_right_joint_transforms_world": self._latest_joint_transforms_world[robots.RIGHT]
             is not None,
+            "feather_debug_enabled": (
+                self._feather_publisher.trajectory_enabled if self._feather_publisher is not None else False
+            ),
+            "feather_debug_bind_address": (
+                self._feather_publisher.bind_address if self._feather_publisher is not None else None
+            ),
+            "feather_debug_source_path": (
+                self._feather_publisher.source_path if self._feather_publisher is not None else None
+            ),
+            "feather_debug_fps": self._feather_publisher.fps if self._feather_publisher is not None else None,
+            "feather_debug_frame_count": (
+                self._feather_publisher.frame_count if self._feather_publisher is not None else 0
+            ),
+            "feather_step_payload_enabled": (
+                self._feather_publisher.step_payload_enabled if self._feather_publisher is not None else False
+            ),
+            "feather_step_payload_bind_address": (
+                self._feather_publisher.bind_address
+                if self._feather_publisher is not None and self._feather_publisher.step_payload_enabled
+                else None
+            ),
         }
 
 
@@ -677,17 +1021,61 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--dof", type=int, default=16)
     parser.add_argument("--payload-log-dir", default="logs/dummy_wm_server")
+    parser.add_argument(
+        "--feather-trajectory-jsonl",
+        default=None,
+        help="Optional JSONL trajectory to stream into the Unity feather debug overlay.",
+    )
+    parser.add_argument(
+        "--feather-bind-host",
+        default="0.0.0.0",
+        help="Interface to bind the feather PUB socket to. Default: 0.0.0.0",
+    )
+    parser.add_argument("--feather-port", type=int, default=15102)
+    parser.add_argument("--feather-fps", type=float, default=15.0)
+    parser.add_argument("--feather-point-size", type=float, default=0.015)
+    parser.add_argument(
+        "--feather-from-step-payload",
+        action="store_true",
+        help="Publish the exact `/step` hand payload back to the Unity feather overlay.",
+    )
     args = parser.parse_args()
+
+    feather_publisher: Optional[FeatherTrajectoryPublisher] = None
+    if args.feather_trajectory_jsonl or args.feather_from_step_payload:
+        feather_publisher = FeatherTrajectoryPublisher(
+            trajectory_jsonl_path=args.feather_trajectory_jsonl,
+            bind_host=args.feather_bind_host,
+            port=args.feather_port,
+            fps=args.feather_fps,
+            point_size=args.feather_point_size,
+            step_payload_enabled=args.feather_from_step_payload,
+        )
+        feather_publisher.start()
 
     wm_server = DummyWMServer(
         dof=args.dof,
         width=args.width,
         height=args.height,
         payload_log_dir=args.payload_log_dir,
+        feather_publisher=feather_publisher,
     )
     http_server = _DummyWMHTTPServer((args.host, args.port), _RequestHandler, wm_server)
     print(f"Dummy WM server listening on http://{args.host}:{args.port}")
     print(f"Payload log: {wm_server.payload_log_path}")
+    if feather_publisher is not None:
+        if feather_publisher.trajectory_enabled:
+            print(
+                "Feather debug stream enabled: "
+                f"{feather_publisher.bind_address} "
+                f"(source={feather_publisher.source_path}, frames={feather_publisher.frame_count}, fps={feather_publisher.fps:.2f})"
+            )
+        if feather_publisher.step_payload_enabled:
+            print(
+                "Feather step-payload echo enabled: "
+                f"{feather_publisher.bind_address} "
+                f"(fps={feather_publisher.fps:.2f})"
+            )
     try:
         http_server.serve_forever()
     except KeyboardInterrupt:

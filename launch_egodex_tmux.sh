@@ -6,6 +6,12 @@ SESSION_NAME="egodex_remote_wm"
 CONDA_ENV="beavr_teleop"
 HOST="127.0.0.1"
 PORT="18080"
+FEATHER_JSONL=""
+FEATHER_BIND_HOST="0.0.0.0"
+FEATHER_PORT="15102"
+FEATHER_FPS="15"
+FEATHER_FROM_STEP_PAYLOAD=0
+WM_HEARTBEAT_HZ=""
 ATTACH=1
 RUN=0
 FRESH=0
@@ -31,6 +37,15 @@ Options:
   --env NAME           Override conda environment name.
   --host HOST          WM host passed to both panes. Default: 127.0.0.1
   --port PORT          WM port passed to both panes. Default: 18080
+  --feather-jsonl PATH Enable the feather debug point stream from a trajectory JSONL.
+  --feather-bind-host HOST
+                      Feather PUB bind host. Default: 0.0.0.0
+  --feather-port PORT Feather PUB port. Default: 15102
+  --feather-fps FPS   Feather stream rate. Default: 15
+  --feather-from-step-payload
+                      Echo the exact `/step` hand payload back to the feather port.
+  --wm-heartbeat-hz HZ
+                      WM request/update rate for teleop. Defaults to config/env.
   -h, --help           Show this help.
 USAGE
 }
@@ -65,6 +80,30 @@ while [[ $# -gt 0 ]]; do
       PORT="$2"
       shift 2
       ;;
+    --feather-jsonl)
+      FEATHER_JSONL="$2"
+      shift 2
+      ;;
+    --feather-bind-host)
+      FEATHER_BIND_HOST="$2"
+      shift 2
+      ;;
+    --feather-port)
+      FEATHER_PORT="$2"
+      shift 2
+      ;;
+    --feather-fps)
+      FEATHER_FPS="$2"
+      shift 2
+      ;;
+    --feather-from-step-payload)
+      FEATHER_FROM_STEP_PAYLOAD=1
+      shift
+      ;;
+    --wm-heartbeat-hz)
+      WM_HEARTBEAT_HZ="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -96,6 +135,24 @@ fi
 
 WM_CMD="source \"$CONDA_SH\" && conda activate \"$CONDA_ENV\" && cd \"$REPO_ROOT\" && PYTHONPATH=src python -m beavr.teleop.components.interface.robots.ego_dex_dummy_wm_server --host $HOST --port $PORT"
 TELEOP_CMD="source \"$CONDA_SH\" && conda activate \"$CONDA_ENV\" && cd \"$REPO_ROOT\" && PYTHONPATH=src EGO_DEX_WM_HOST=$HOST EGO_DEX_WM_PORT=$PORT python teleop.py --robot_name=ego_dex --laterality=bimanual"
+
+if [[ -n "$FEATHER_JSONL" || "$FEATHER_FROM_STEP_PAYLOAD" -eq 1 ]]; then
+  WM_CMD+=" --feather-bind-host $FEATHER_BIND_HOST"
+  WM_CMD+=" --feather-port $FEATHER_PORT"
+  WM_CMD+=" --feather-fps $FEATHER_FPS"
+fi
+
+if [[ -n "$FEATHER_JSONL" ]]; then
+  WM_CMD+=" --feather-trajectory-jsonl \"$FEATHER_JSONL\""
+fi
+
+if [[ "$FEATHER_FROM_STEP_PAYLOAD" -eq 1 ]]; then
+  WM_CMD+=" --feather-from-step-payload"
+fi
+
+if [[ -n "$WM_HEARTBEAT_HZ" ]]; then
+  TELEOP_CMD="source \"$CONDA_SH\" && conda activate \"$CONDA_ENV\" && cd \"$REPO_ROOT\" && PYTHONPATH=src EGO_DEX_WM_HOST=$HOST EGO_DEX_WM_PORT=$PORT EGO_DEX_WM_HEARTBEAT_HZ=$WM_HEARTBEAT_HZ python teleop.py --robot_name=ego_dex --laterality=bimanual"
+fi
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
   if [[ "$FRESH" -eq 1 ]]; then

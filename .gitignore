@@ -31,6 +31,12 @@ logs/
 logs/pose_log*
 logs/*.json
 logs/*.txt
+/slurm-*.out
+
+# Local debug artifacts
+/assemble_disassemble_jigsaw_puzzle__839__two_hand_trajectory.jsonl
+/egodex_traj.jsonl
+/world-model-server/
 
 *ik*.json
 *log*.json

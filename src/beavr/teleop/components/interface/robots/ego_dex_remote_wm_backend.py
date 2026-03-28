@@ -33,6 +33,7 @@ class RemoteEgoDexWMBackend:
         heartbeat_hz: float = 2.0,
         bootstrap_reset: bool = True,
         reset_frame_dir: Optional[str] = None,
+        auto_reset_every_steps: int = 30,
     ):
         self._wm_client = wm_client
         self._dof = int(dof)
@@ -48,6 +49,8 @@ class RemoteEgoDexWMBackend:
             robots.LEFT: {},
             robots.RIGHT: {},
         }
+        self._successful_step_count = 0
+        self._auto_reset_every_steps = max(int(auto_reset_every_steps), 0)
         self._reset_frame_dir = str(reset_frame_dir) if reset_frame_dir else None
         if self._reset_frame_dir is not None:
             os.makedirs(self._reset_frame_dir, exist_ok=True)
@@ -148,6 +151,33 @@ class RemoteEgoDexWMBackend:
             for joint_name, transform in joint_transforms_world.items()
         }
 
+    @staticmethod
+    def _flip_keypoints_z(keypoints_xyz: Any) -> Any:
+        if keypoints_xyz is None:
+            return None
+        keypoints = np.asarray(keypoints_xyz, dtype=np.float32)
+        if keypoints.ndim != 2 or keypoints.shape[1] != 3:
+            return keypoints_xyz
+        flipped = keypoints.copy()
+        flipped[:, 2] *= -1.0
+        return flipped.tolist()
+
+    @staticmethod
+    def _flip_transform_z(transform: Any) -> Any:
+        matrix = np.asarray(transform, dtype=np.float32)
+        if matrix.shape != (4, 4):
+            return transform
+        flip = np.diag([1.0, 1.0, -1.0, 1.0]).astype(np.float32)
+        return (flip @ matrix @ flip).tolist()
+
+    def _flip_joint_transforms_world_z(self, joint_transforms_world: Any) -> Any:
+        if joint_transforms_world is None or not isinstance(joint_transforms_world, Mapping):
+            return joint_transforms_world
+        return {
+            str(joint_name): self._flip_transform_z(transform)
+            for joint_name, transform in joint_transforms_world.items()
+        }
+
     def _build_hand_payload(self, side: str) -> Optional[dict[str, Any]]:
         input_payload = self._latest_input_by_side.get(side, {})
         action_payload = self._last_action_by_side.get(side)
@@ -161,11 +191,13 @@ class RemoteEgoDexWMBackend:
         return {
             "source": source,
             "timestamp_s": input_payload.get("timestamp_s"),
-            "keypoints_xyz": input_payload.get("keypoints_xyz"),
+            "keypoints_xyz": self._flip_keypoints_z(input_payload.get("keypoints_xyz")),
             "is_relative": bool(input_payload.get("is_relative", False)),
             "world_frame": input_payload.get("world_frame"),
             "joint_order": input_payload.get("joint_order"),
-            "joint_transforms_world": input_payload.get("joint_transforms_world"),
+            "joint_transforms_world": self._flip_joint_transforms_world_z(
+                input_payload.get("joint_transforms_world")
+            ),
             "joint_positions_rad": (
                 action_payload.get("joint_positions_rad") if action_payload is not None else None
             ),
@@ -173,6 +205,9 @@ class RemoteEgoDexWMBackend:
         }
 
     def _build_snapshot_payload(self) -> Optional[dict[str, Any]]:
+        if not any(bool(self._latest_input_by_side.get(side)) for side in (robots.LEFT, robots.RIGHT)):
+            return None
+
         hands = {
             robots.LEFT: self._build_hand_payload(robots.LEFT),
             robots.RIGHT: self._build_hand_payload(robots.RIGHT),
@@ -272,6 +307,15 @@ class RemoteEgoDexWMBackend:
         self._last_request_wall_time_s = now_s
         try:
             self._request_step(payload, event_name="remote_wm_step")
+            self._successful_step_count += 1
+            if (
+                self._auto_reset_every_steps > 0
+                and self._successful_step_count % self._auto_reset_every_steps == 0
+            ):
+                self.reset(new=False)
+                if self._last_event_record is not None:
+                    self._last_event_record["event"] = "remote_wm_auto_reset"
+                    self._last_event_record["trigger_step_count"] = self._successful_step_count
         except Exception:
             logger.exception("Remote WM step failed")
 
