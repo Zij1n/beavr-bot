@@ -23,6 +23,15 @@ from .ego_dex_wm_client import WMClient
 logger = logging.getLogger(__name__)
 
 _FLIP_Z_4X4 = np.diag([1.0, 1.0, -1.0, 1.0]).astype(np.float32)
+_LEFT_STEP_LOCAL_POST_Z_FLIP_4X4 = np.array(
+    [
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ],
+    dtype=np.float32,
+)
 _DROP_DISTANCE_JOINTS = frozenset({"palm"})
 DEFAULT_STEP_DISTANCE_THRESHOLD = 0.0018351837001815872
 DEFAULT_STEP_HAND_SCALING_ENABLE = True
@@ -80,6 +89,13 @@ def _flip_transform_z_array(transform: np.ndarray) -> np.ndarray:
     if matrix.shape != (4, 4):
         return matrix
     return _FLIP_Z_4X4 @ matrix @ _FLIP_Z_4X4
+
+
+def _apply_left_step_local_post_z_flip_transform_array(transform: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(transform, dtype=np.float32)
+    if matrix.shape != (4, 4):
+        return matrix
+    return matrix @ _LEFT_STEP_LOCAL_POST_Z_FLIP_4X4
 
 
 def _ordered_joint_names(
@@ -574,6 +590,18 @@ class RemoteEgoDexWMBackend:
             for joint_name, transform in joint_transforms_world.items()
         }
 
+    def _apply_left_step_local_post_z_flip_joint_transforms_world(
+        self,
+        side: str,
+        joint_transforms_world: Any,
+    ) -> Any:
+        if side != robots.LEFT or joint_transforms_world is None or not isinstance(joint_transforms_world, Mapping):
+            return joint_transforms_world
+        return {
+            str(joint_name): _apply_left_step_local_post_z_flip_transform_array(transform).tolist()
+            for joint_name, transform in joint_transforms_world.items()
+        }
+
     def _normalize_step_hand_payload(self, hand_payload: Optional[Mapping[str, Any]]) -> Optional[dict[str, Any]]:
         if not isinstance(hand_payload, Mapping):
             return None
@@ -713,6 +741,13 @@ class RemoteEgoDexWMBackend:
         input_payload = self._latest_input_by_side.get(side, {})
         if not input_payload:
             return None
+        step_joint_transforms_world = self._flip_joint_transforms_world_z(
+            input_payload.get("joint_transforms_world")
+        )
+        step_joint_transforms_world = self._apply_left_step_local_post_z_flip_joint_transforms_world(
+            side,
+            step_joint_transforms_world,
+        )
         return {
             "source": input_payload.get("source"),
             "timestamp_s": input_payload.get("timestamp_s"),
@@ -720,9 +755,7 @@ class RemoteEgoDexWMBackend:
             "is_relative": bool(input_payload.get("is_relative", False)),
             "world_frame": input_payload.get("world_frame"),
             "joint_order": input_payload.get("joint_order"),
-            "joint_transforms_world": self._flip_joint_transforms_world_z(
-                input_payload.get("joint_transforms_world")
-            ),
+            "joint_transforms_world": step_joint_transforms_world,
         }
 
     def _build_current_input_step_hands(self) -> dict[str, Optional[dict[str, Any]]]:
