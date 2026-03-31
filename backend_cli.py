@@ -23,12 +23,17 @@ def _format_float(value: Any) -> str:
 
 
 def _format_status(status: dict[str, Any]) -> str:
+    scaling_calibrated = status.get("step_hand_scaling_calibrated_by_side", {})
+    scaling_bones = status.get("step_hand_scaling_bones_by_side", {})
     return (
         "[status] "
         f"gate_error={_format_float(status.get('gate_error'))} "
         f"threshold={_format_float(status.get('step_distance_threshold'))} "
         f"blocked={status.get('blocked')} "
         f"reference={status.get('reference_source')} "
+        f"scaling={status.get('step_hand_scaling_enabled')} "
+        f"left_cal={scaling_calibrated.get('left')}[{scaling_bones.get('left')}] "
+        f"right_cal={scaling_calibrated.get('right')}[{scaling_bones.get('right')}] "
         f"ok={status.get('ok')}"
     )
 

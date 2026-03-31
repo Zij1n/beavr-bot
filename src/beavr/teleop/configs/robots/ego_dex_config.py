@@ -119,7 +119,10 @@ class EgoDexRobotCfg:
     wm_port: int = 18080
     wm_timeout_s: float = 3.0
     wm_heartbeat_hz: float = 2.0
-    step_distance_threshold: float = 0.22577618051049414
+    step_distance_threshold: float = 0.0018351837001815872
+    step_hand_scaling_enable: bool = True
+    step_hand_scale_min: float = 0.0
+    step_hand_scale_max: float = 10.0
     hand_visualization_bind_host: str = "0.0.0.0"
     hand_visualization_port: int = 15102
     hand_visualization_fps: float = 15.0
@@ -140,6 +143,16 @@ class EgoDexRobotCfg:
         )
         step_distance_threshold = float(
             os.getenv("EGO_DEX_STEP_DISTANCE_THRESHOLD", str(self.step_distance_threshold))
+        )
+        step_hand_scaling_enable = os.getenv(
+            "EGO_DEX_STEP_HAND_SCALING_ENABLE",
+            "1" if self.step_hand_scaling_enable else "0",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        step_hand_scale_min = float(
+            os.getenv("EGO_DEX_STEP_HAND_SCALE_MIN", str(self.step_hand_scale_min))
+        )
+        step_hand_scale_max = float(
+            os.getenv("EGO_DEX_STEP_HAND_SCALE_MAX", str(self.step_hand_scale_max))
         )
         hand_visualization_enabled = os.getenv(
             "EGO_DEX_VISUALIZE_HANDS_ENABLE",
@@ -174,6 +187,9 @@ class EgoDexRobotCfg:
             heartbeat_hz=wm_heartbeat_hz,
             reset_frame_dir=self.log_dir,
             step_distance_threshold=step_distance_threshold,
+            step_hand_scaling_enable=step_hand_scaling_enable,
+            step_hand_scale_min=step_hand_scale_min,
+            step_hand_scale_max=step_hand_scale_max,
             hand_visualization_bind_host=(
                 hand_visualization_bind_host if hand_visualization_enabled else None
             ),

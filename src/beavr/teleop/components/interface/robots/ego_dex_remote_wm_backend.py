@@ -24,7 +24,10 @@ logger = logging.getLogger(__name__)
 
 _FLIP_Z_4X4 = np.diag([1.0, 1.0, -1.0, 1.0]).astype(np.float32)
 _DROP_DISTANCE_JOINTS = frozenset({"palm"})
-DEFAULT_STEP_DISTANCE_THRESHOLD = 0.22577618051049414
+DEFAULT_STEP_DISTANCE_THRESHOLD = 0.0018351837001815872
+DEFAULT_STEP_HAND_SCALING_ENABLE = True
+DEFAULT_STEP_HAND_SCALE_MIN = 0.0
+DEFAULT_STEP_HAND_SCALE_MAX = 10.0
 HAND_VISUALIZATION_DISPLAY_OFFSET_Y_M = 0.10
 HAND_VISUALIZATION_LIVE_SIDE_COLORS = {
     robots.LEFT: (1.0, 0.22, 0.22, 0.98),
@@ -34,6 +37,35 @@ HAND_VISUALIZATION_REFERENCE_SIDE_COLORS = {
     robots.LEFT: (1.0, 0.86, 0.18, 0.98),
     robots.RIGHT: (0.24, 0.56, 1.0, 0.98),
 }
+_MIN_VALID_BONE_LENGTH = 1e-6
+_CONTROL_PARENT_BY_JOINT = {
+    "thumb_metacarpal": "wrist",
+    "thumb_proximal": "thumb_metacarpal",
+    "thumb_distal": "thumb_proximal",
+    "thumb_tip": "thumb_distal",
+    "index_metacarpal": "wrist",
+    "index_proximal": "index_metacarpal",
+    "index_intermediate": "index_proximal",
+    "index_distal": "index_intermediate",
+    "index_tip": "index_distal",
+    "middle_metacarpal": "wrist",
+    "middle_proximal": "middle_metacarpal",
+    "middle_intermediate": "middle_proximal",
+    "middle_distal": "middle_intermediate",
+    "middle_tip": "middle_distal",
+    "ring_metacarpal": "wrist",
+    "ring_proximal": "ring_metacarpal",
+    "ring_intermediate": "ring_proximal",
+    "ring_distal": "ring_intermediate",
+    "ring_tip": "ring_distal",
+    "little_metacarpal": "wrist",
+    "little_proximal": "little_metacarpal",
+    "little_intermediate": "little_proximal",
+    "little_distal": "little_intermediate",
+    "little_tip": "little_distal",
+}
+_CONTROL_JOINT_ORDER = ("wrist",) + tuple(_CONTROL_PARENT_BY_JOINT.keys())
+_CONTROL_EDGES = tuple((parent, child) for child, parent in _CONTROL_PARENT_BY_JOINT.items())
 
 
 def _flip_keypoints_z_array(keypoints_xyz: np.ndarray) -> np.ndarray:
@@ -146,6 +178,76 @@ def _extract_step_space_positions(
     }
 
 
+def _copy_position_dict(positions: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
+    return {
+        str(joint_name): np.asarray(position, dtype=np.float32).copy()
+        for joint_name, position in positions.items()
+        if np.asarray(position, dtype=np.float32).shape == (3,)
+        and np.isfinite(np.asarray(position, dtype=np.float32)).all()
+    }
+
+
+def _set_hand_payload_positions(
+    hand_payload: Mapping[str, Any],
+    positions_by_joint: Mapping[str, np.ndarray],
+) -> dict[str, Any]:
+    payload = copy.deepcopy(dict(hand_payload))
+    positions = _copy_position_dict(positions_by_joint)
+
+    joint_transforms_world = payload.get("joint_transforms_world")
+    if isinstance(joint_transforms_world, Mapping):
+        updated_transforms: dict[str, Any] = {}
+        for joint_name, raw_transform in joint_transforms_world.items():
+            transform = np.asarray(raw_transform, dtype=np.float32)
+            if transform.shape == (4, 4) and np.isfinite(transform).all():
+                updated_transform = transform.copy()
+                if joint_name in positions:
+                    updated_transform[:3, 3] = positions[joint_name]
+                updated_transforms[str(joint_name)] = updated_transform.tolist()
+            else:
+                updated_transforms[str(joint_name)] = raw_transform
+        wrist_transform = updated_transforms.get("wrist")
+        if wrist_transform is not None:
+            updated_transforms["palm"] = copy.deepcopy(wrist_transform)
+        payload["joint_transforms_world"] = updated_transforms
+
+    keypoints_xyz = payload.get("keypoints_xyz")
+    if keypoints_xyz is not None:
+        keypoints = np.asarray(keypoints_xyz, dtype=np.float32)
+        if keypoints.ndim == 2 and keypoints.shape[1] == 3:
+            updated_keypoints = keypoints.copy()
+            joint_names = _ordered_joint_names(payload, updated_keypoints.shape[0])
+            if "wrist" in positions:
+                positions = dict(positions)
+                positions["palm"] = positions["wrist"].copy()
+            for index, joint_name in enumerate(joint_names):
+                position = positions.get(joint_name)
+                if position is None:
+                    continue
+                updated_keypoints[index] = position
+            payload["keypoints_xyz"] = updated_keypoints.tolist()
+
+    return payload
+
+
+def _normalize_step_transport_hand_payload(hand_payload: Mapping[str, Any]) -> dict[str, Any]:
+    positions = _extract_step_space_positions(hand_payload, drop_palm=False)
+    wrist_position = positions.get("wrist")
+    if wrist_position is None:
+        return copy.deepcopy(dict(hand_payload))
+    positions["palm"] = wrist_position.copy()
+    return _set_hand_payload_positions(hand_payload, positions)
+
+
+def _extract_control_step_positions(hand_payload: Mapping[str, Any]) -> dict[str, np.ndarray]:
+    positions = _extract_step_space_positions(hand_payload, drop_palm=False)
+    return {
+        joint_name: positions[joint_name]
+        for joint_name in _CONTROL_JOINT_ORDER
+        if joint_name in positions
+    }
+
+
 def _make_hand_visualization_point(
     position: np.ndarray,
     color: tuple[float, float, float, float],
@@ -214,7 +316,7 @@ class TeleopHandVisualizationPublisher:
     def publish(
         self,
         *,
-        live_tracking_hands: Mapping[str, Optional[Mapping[str, Any]]],
+        live_step_hands: Mapping[str, Optional[Mapping[str, Any]]],
         reference_step_hands: Mapping[str, Optional[Mapping[str, Any]]],
         show_reference: bool,
     ) -> None:
@@ -226,11 +328,11 @@ class TeleopHandVisualizationPublisher:
 
         points: list[dict[str, Any]] = []
         for side in (robots.LEFT, robots.RIGHT):
-            live_hand = live_tracking_hands.get(side)
+            live_hand = live_step_hands.get(side)
             if isinstance(live_hand, Mapping):
                 for joint_name, position in _extract_hand_points_for_display(
                     live_hand,
-                    payload_space="tracking",
+                    payload_space="step",
                 ):
                     points.append(
                         _make_hand_visualization_point(
@@ -289,6 +391,9 @@ class RemoteEgoDexWMBackend:
         bootstrap_reset: bool = True,
         reset_frame_dir: Optional[str] = None,
         step_distance_threshold: float = DEFAULT_STEP_DISTANCE_THRESHOLD,
+        step_hand_scaling_enable: bool = DEFAULT_STEP_HAND_SCALING_ENABLE,
+        step_hand_scale_min: float = DEFAULT_STEP_HAND_SCALE_MIN,
+        step_hand_scale_max: float = DEFAULT_STEP_HAND_SCALE_MAX,
         hand_visualization_bind_host: Optional[str] = None,
         hand_visualization_port: Optional[int] = None,
         hand_visualization_fps: float = 15.0,
@@ -309,9 +414,29 @@ class RemoteEgoDexWMBackend:
             robots.RIGHT: {},
         }
         self._step_distance_threshold = max(float(step_distance_threshold), 0.0)
+        self._step_hand_scaling_enable = bool(step_hand_scaling_enable)
+        self._step_hand_scale_min = float(step_hand_scale_min)
+        self._step_hand_scale_max = float(step_hand_scale_max)
+        if self._step_hand_scale_max < self._step_hand_scale_min:
+            self._step_hand_scale_min, self._step_hand_scale_max = (
+                self._step_hand_scale_max,
+                self._step_hand_scale_min,
+            )
         self._accepted_step_hands: dict[str, Optional[dict[str, Any]]] = {
             robots.LEFT: None,
             robots.RIGHT: None,
+        }
+        self._reset_reference_step_hands: dict[str, Optional[dict[str, Any]]] = {
+            robots.LEFT: None,
+            robots.RIGHT: None,
+        }
+        self._step_hand_bone_scale_by_side: dict[str, dict[tuple[str, str], float]] = {
+            robots.LEFT: {},
+            robots.RIGHT: {},
+        }
+        self._step_hand_scaling_calibrated_by_side: dict[str, bool] = {
+            robots.LEFT: False,
+            robots.RIGHT: False,
         }
         self._pending_reset_step_snapshot: Optional[dict[str, Any]] = None
         self._last_gate_value: Optional[float] = None
@@ -449,6 +574,115 @@ class RemoteEgoDexWMBackend:
             for joint_name, transform in joint_transforms_world.items()
         }
 
+    def _normalize_step_hand_payload(self, hand_payload: Optional[Mapping[str, Any]]) -> Optional[dict[str, Any]]:
+        if not isinstance(hand_payload, Mapping):
+            return None
+        return _normalize_step_transport_hand_payload(hand_payload)
+
+    def _normalize_step_hands(
+        self,
+        hands: Mapping[str, Optional[Mapping[str, Any]]],
+    ) -> dict[str, Optional[dict[str, Any]]]:
+        return {
+            side: self._normalize_step_hand_payload(hands.get(side))
+            for side in (robots.LEFT, robots.RIGHT)
+        }
+
+    def _calibrate_step_hand_scaling_for_side(
+        self,
+        side: str,
+        *,
+        live_hand: Mapping[str, Any],
+        reset_hand: Mapping[str, Any],
+    ) -> bool:
+        live_positions = _extract_control_step_positions(live_hand)
+        reset_positions = _extract_control_step_positions(reset_hand)
+        if "wrist" not in live_positions or "wrist" not in reset_positions:
+            return False
+
+        bone_scales: dict[tuple[str, str], float] = {}
+        for parent_joint, child_joint in _CONTROL_EDGES:
+            live_parent = live_positions.get(parent_joint)
+            live_child = live_positions.get(child_joint)
+            reset_parent = reset_positions.get(parent_joint)
+            reset_child = reset_positions.get(child_joint)
+            if (
+                live_parent is None
+                or live_child is None
+                or reset_parent is None
+                or reset_child is None
+            ):
+                continue
+            live_length = float(np.linalg.norm(live_child - live_parent))
+            reset_length = float(np.linalg.norm(reset_child - reset_parent))
+            if not np.isfinite(live_length) or live_length <= _MIN_VALID_BONE_LENGTH:
+                continue
+            if not np.isfinite(reset_length):
+                continue
+            scale_value = float(np.clip(
+                reset_length / live_length,
+                self._step_hand_scale_min,
+                self._step_hand_scale_max,
+            ))
+            bone_scales[(parent_joint, child_joint)] = scale_value
+
+        self._step_hand_bone_scale_by_side[side] = bone_scales
+        self._step_hand_scaling_calibrated_by_side[side] = bool(bone_scales)
+        return bool(bone_scales)
+
+    def _maybe_calibrate_step_hand_scaling(
+        self,
+        live_step_hands: Mapping[str, Optional[Mapping[str, Any]]],
+    ) -> None:
+        if not self._step_hand_scaling_enable:
+            return
+        for side in (robots.LEFT, robots.RIGHT):
+            if self._step_hand_scaling_calibrated_by_side.get(side):
+                continue
+            live_hand = live_step_hands.get(side)
+            reset_hand = self._reset_reference_step_hands.get(side)
+            if not isinstance(live_hand, Mapping) or not isinstance(reset_hand, Mapping):
+                continue
+            self._calibrate_step_hand_scaling_for_side(
+                side,
+                live_hand=live_hand,
+                reset_hand=reset_hand,
+            )
+
+    def _apply_step_hand_scaling_to_hand_payload(
+        self,
+        side: str,
+        hand_payload: Optional[Mapping[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        normalized_hand = self._normalize_step_hand_payload(hand_payload)
+        if normalized_hand is None:
+            return None
+        if not self._step_hand_scaling_enable:
+            return normalized_hand
+
+        current_positions = _extract_control_step_positions(normalized_hand)
+        wrist_position = current_positions.get("wrist")
+        if wrist_position is None:
+            return normalized_hand
+
+        scaled_positions: dict[str, np.ndarray] = {
+            "wrist": wrist_position.copy(),
+            "palm": wrist_position.copy(),
+        }
+        side_scales = self._step_hand_bone_scale_by_side.get(side, {})
+        for parent_joint, child_joint in _CONTROL_EDGES:
+            parent_scaled = scaled_positions.get(parent_joint)
+            parent_raw = current_positions.get(parent_joint)
+            child_raw = current_positions.get(child_joint)
+            if parent_scaled is None or parent_raw is None or child_raw is None:
+                continue
+            scale_value = float(side_scales.get((parent_joint, child_joint), 1.0))
+            if not np.isfinite(scale_value):
+                scale_value = 1.0
+            scaled_positions[child_joint] = parent_scaled + scale_value * (child_raw - parent_raw)
+
+        return _set_hand_payload_positions(normalized_hand, scaled_positions)
+
     def _build_hand_payload(self, side: str) -> Optional[dict[str, Any]]:
         input_payload = self._latest_input_by_side.get(side, {})
         action_payload = self._last_action_by_side.get(side)
@@ -495,6 +729,14 @@ class RemoteEgoDexWMBackend:
         return {
             robots.LEFT: self._build_current_input_step_hand_payload(robots.LEFT),
             robots.RIGHT: self._build_current_input_step_hand_payload(robots.RIGHT),
+        }
+
+    def _build_scaled_current_input_step_hands(self) -> dict[str, Optional[dict[str, Any]]]:
+        normalized_hands = self._normalize_step_hands(self._build_current_input_step_hands())
+        self._maybe_calibrate_step_hand_scaling(normalized_hands)
+        return {
+            side: self._apply_step_hand_scaling_to_hand_payload(side, normalized_hands.get(side))
+            for side in (robots.LEFT, robots.RIGHT)
         }
 
     def _copy_step_hands(self, hands: Mapping[str, Any]) -> dict[str, Optional[dict[str, Any]]]:
@@ -550,11 +792,27 @@ class RemoteEgoDexWMBackend:
 
     def _seed_from_reset_state(self, state: Mapping[str, Any]) -> None:
         hands = state.get("hands")
+        self._step_hand_bone_scale_by_side = {
+            robots.LEFT: {},
+            robots.RIGHT: {},
+        }
+        self._step_hand_scaling_calibrated_by_side = {
+            robots.LEFT: False,
+            robots.RIGHT: False,
+        }
         if not isinstance(hands, Mapping):
+            self._reset_reference_step_hands = {robots.LEFT: None, robots.RIGHT: None}
             self._accepted_step_hands = {robots.LEFT: None, robots.RIGHT: None}
             self._pending_reset_step_snapshot = None
             return
-        copied_hands = self._copy_step_hands(hands)
+        normalized_hands = self._normalize_step_hands(
+            {
+                side: hands.get(side) if isinstance(hands.get(side), Mapping) else None
+                for side in (robots.LEFT, robots.RIGHT)
+            }
+        )
+        copied_hands = self._copy_step_hands(normalized_hands)
+        self._reset_reference_step_hands = self._copy_step_hands(copied_hands)
         self._accepted_step_hands = copied_hands
         self._pending_reset_step_snapshot = self._snapshot_payload_from_hands(copied_hands)
 
@@ -563,7 +821,7 @@ class RemoteEgoDexWMBackend:
         current_step_hands: Mapping[str, Optional[Mapping[str, Any]]],
         reference_step_hands: Mapping[str, Optional[Mapping[str, Any]]],
     ) -> Optional[float]:
-        total_distance = 0.0
+        total_squared_error = 0.0
         for side in (robots.LEFT, robots.RIGHT):
             current_hand = current_step_hands.get(side)
             reference_hand = reference_step_hands.get(side)
@@ -574,35 +832,39 @@ class RemoteEgoDexWMBackend:
             common_joints = sorted(set(current_positions) & set(reference_positions))
             if not common_joints:
                 return None
-            distances = [
-                float(np.linalg.norm(current_positions[joint_name] - reference_positions[joint_name]))
+            squared_errors = [
+                float(np.dot(
+                    current_positions[joint_name] - reference_positions[joint_name],
+                    current_positions[joint_name] - reference_positions[joint_name],
+                ))
                 for joint_name in common_joints
             ]
-            total_distance += float(sum(distances))
-        return float(total_distance)
+            total_squared_error += float(sum(squared_errors))
+        return float(total_squared_error)
 
-    def _publish_hand_visualization(self, *, blocked: bool) -> None:
+    def _publish_hand_visualization(
+        self,
+        *,
+        live_step_hands: Optional[Mapping[str, Optional[Mapping[str, Any]]]] = None,
+        blocked: bool,
+    ) -> None:
         if self._hand_visualization_publisher is None:
             return
-        live_tracking_hands = {
-            side: self._latest_input_by_side.get(side) if self._latest_input_by_side.get(side) else None
-            for side in (robots.LEFT, robots.RIGHT)
-        }
+        if live_step_hands is None:
+            live_step_hands = self._build_scaled_current_input_step_hands()
         self._hand_visualization_publisher.publish(
-            live_tracking_hands=live_tracking_hands,
+            live_step_hands=live_step_hands,
             reference_step_hands=self._accepted_step_hands,
             show_reference=bool(blocked),
         )
 
-    def _build_snapshot_payload(self) -> Optional[dict[str, Any]]:
-        if not any(bool(self._latest_input_by_side.get(side)) for side in (robots.LEFT, robots.RIGHT)):
-            return None
-
-        hands = {
-            robots.LEFT: self._build_hand_payload(robots.LEFT),
-            robots.RIGHT: self._build_hand_payload(robots.RIGHT),
-        }
-        if hands[robots.LEFT] is None and hands[robots.RIGHT] is None:
+    def _build_snapshot_payload(
+        self,
+        hands: Optional[Mapping[str, Optional[Mapping[str, Any]]]] = None,
+    ) -> Optional[dict[str, Any]]:
+        if hands is None:
+            hands = self._build_scaled_current_input_step_hands()
+        if not any(isinstance(hands.get(side), Mapping) for side in (robots.LEFT, robots.RIGHT)):
             return None
 
         input_timestamps = [
@@ -624,7 +886,7 @@ class RemoteEgoDexWMBackend:
         }
         if len(world_frames) == 1:
             payload["world_frame"] = next(iter(world_frames))
-        return payload
+        return self._attach_latest_actions(payload)
 
     def _write_reset_frame(self, obs_jpg: bytes, *, new: bool) -> Optional[str]:
         if not obs_jpg or self._reset_frame_dir is None:
@@ -644,6 +906,7 @@ class RemoteEgoDexWMBackend:
         self._latest_obs_frame = self._decode_jpg(obs_jpg)
         self._last_obs_wall_time_s = time.time()
         self._seed_from_reset_state(state)
+        current_step_hands = self._build_scaled_current_input_step_hands()
         self._last_gate_value = None
         self._last_blocked = False
         reset_frame_path = self._write_reset_frame(obs_jpg, new=bool(new))
@@ -655,7 +918,7 @@ class RemoteEgoDexWMBackend:
             "reset_frame_path": reset_frame_path,
             "seeded_step_pose": self._pending_reset_step_snapshot is not None,
         }
-        self._publish_hand_visualization(blocked=False)
+        self._publish_hand_visualization(live_step_hands=current_step_hands, blocked=False)
         return self._latest_obs_frame, self._latest_state
 
     def send_action(self, action: RobotActionCommand) -> None:
@@ -693,8 +956,8 @@ class RemoteEgoDexWMBackend:
         }
 
     def step(self) -> None:
-        payload = self._build_snapshot_payload()
-        current_step_hands = self._build_current_input_step_hands()
+        current_step_hands = self._build_scaled_current_input_step_hands()
+        payload = self._build_snapshot_payload(current_step_hands)
 
         gate_value: Optional[float] = None
         blocked = False
@@ -703,7 +966,7 @@ class RemoteEgoDexWMBackend:
             blocked = gate_value is None or gate_value > self._step_distance_threshold
         self._last_gate_value = gate_value
         self._last_blocked = blocked
-        self._publish_hand_visualization(blocked=blocked)
+        self._publish_hand_visualization(live_step_hands=current_step_hands, blocked=blocked)
 
         if payload is None or blocked:
             return
@@ -760,12 +1023,22 @@ class RemoteEgoDexWMBackend:
         reference_source: Optional[str] = None
         if has_reference_pose:
             reference_source = "reset" if self._pending_reset_step_snapshot is not None else "last_step"
+        scaling_bones_by_side = {
+            side: len(self._step_hand_bone_scale_by_side.get(side, {}))
+            for side in (robots.LEFT, robots.RIGHT)
+        }
         return {
+            "gate_metric": "sum_squared_error",
             "gate_error": self._last_gate_value,
             "step_distance_threshold": self._step_distance_threshold,
             "blocked": bool(self._last_blocked),
             "has_reference_pose": has_reference_pose,
             "reference_source": reference_source,
+            "step_hand_scaling_enabled": bool(self._step_hand_scaling_enable),
+            "step_hand_scaling_calibrated_by_side": dict(self._step_hand_scaling_calibrated_by_side),
+            "step_hand_scaling_bones_by_side": scaling_bones_by_side,
+            "step_hand_scale_min": self._step_hand_scale_min,
+            "step_hand_scale_max": self._step_hand_scale_max,
         }
 
     def pop_pose_record(self) -> Optional[dict]:

@@ -13,6 +13,9 @@ VISUALIZE_HANDS_BIND_HOST="0.0.0.0"
 VISUALIZE_HANDS_PORT="15102"
 VISUALIZE_HANDS_FPS="15"
 STEP_DISTANCE_THRESHOLD=""
+STEP_HAND_SCALING_ENABLE=""
+STEP_HAND_SCALE_MIN=""
+STEP_HAND_SCALE_MAX=""
 WM_HEARTBEAT_HZ=""
 LOCAL_WM_ENABLE=1
 ATTACH=1
@@ -54,6 +57,12 @@ Options:
                       Teleop hand-visualization stream rate. Default: 15
   --step-distance-threshold VALUE
                       Override the teleop `/step` gating threshold.
+  --disable-step-hand-scaling
+                      Disable teleop per-bone hand scaling before `/step`.
+  --step-hand-scale-min VALUE
+                      Minimum per-bone hand scale clamp. Default: config/env
+  --step-hand-scale-max VALUE
+                      Maximum per-bone hand scale clamp. Default: config/env
   --wm-heartbeat-hz HZ
                       WM request/update rate for teleop. Defaults to config/env.
   -h, --help           Show this help.
@@ -144,6 +153,18 @@ while [[ $# -gt 0 ]]; do
       STEP_DISTANCE_THRESHOLD="$2"
       shift 2
       ;;
+    --disable-step-hand-scaling)
+      STEP_HAND_SCALING_ENABLE="0"
+      shift
+      ;;
+    --step-hand-scale-min)
+      STEP_HAND_SCALE_MIN="$2"
+      shift 2
+      ;;
+    --step-hand-scale-max)
+      STEP_HAND_SCALE_MAX="$2"
+      shift 2
+      ;;
     --wm-heartbeat-hz)
       WM_HEARTBEAT_HZ="$2"
       shift 2
@@ -194,6 +215,15 @@ if [[ "$VISUALIZE_HANDS_ENABLE" -eq 1 ]]; then
 fi
 if [[ -n "$STEP_DISTANCE_THRESHOLD" ]]; then
   TELEOP_ENV+=" EGO_DEX_STEP_DISTANCE_THRESHOLD=$STEP_DISTANCE_THRESHOLD"
+fi
+if [[ -n "$STEP_HAND_SCALING_ENABLE" ]]; then
+  TELEOP_ENV+=" EGO_DEX_STEP_HAND_SCALING_ENABLE=$STEP_HAND_SCALING_ENABLE"
+fi
+if [[ -n "$STEP_HAND_SCALE_MIN" ]]; then
+  TELEOP_ENV+=" EGO_DEX_STEP_HAND_SCALE_MIN=$STEP_HAND_SCALE_MIN"
+fi
+if [[ -n "$STEP_HAND_SCALE_MAX" ]]; then
+  TELEOP_ENV+=" EGO_DEX_STEP_HAND_SCALE_MAX=$STEP_HAND_SCALE_MAX"
 fi
 TELEOP_CMD="source \"$CONDA_SH\" && conda activate \"$CONDA_ENV\" && cd \"$REPO_ROOT\" && $TELEOP_ENV python teleop.py --robot_name=ego_dex --laterality=bimanual"
 
