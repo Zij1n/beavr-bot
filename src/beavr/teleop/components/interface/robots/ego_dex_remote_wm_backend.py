@@ -32,6 +32,19 @@ _LEFT_STEP_LOCAL_POST_Z_FLIP_4X4 = np.array(
     ],
     dtype=np.float32,
 )
+_RIGHT_STEP_LOCAL_POST_Z_FLIP_4X4 = np.array(
+    [
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ],
+    dtype=np.float32,
+)
+_STEP_LOCAL_POST_Z_FLIP_BY_SIDE = {
+    robots.LEFT: _LEFT_STEP_LOCAL_POST_Z_FLIP_4X4,
+    robots.RIGHT: _RIGHT_STEP_LOCAL_POST_Z_FLIP_4X4,
+}
 _DROP_DISTANCE_JOINTS = frozenset({"palm"})
 DEFAULT_STEP_DISTANCE_THRESHOLD = 0.0018351837001815872
 DEFAULT_STEP_HAND_SCALING_ENABLE = True
@@ -91,11 +104,14 @@ def _flip_transform_z_array(transform: np.ndarray) -> np.ndarray:
     return _FLIP_Z_4X4 @ matrix @ _FLIP_Z_4X4
 
 
-def _apply_left_step_local_post_z_flip_transform_array(transform: np.ndarray) -> np.ndarray:
+def _apply_step_local_post_z_flip_transform_array(side: str, transform: np.ndarray) -> np.ndarray:
     matrix = np.asarray(transform, dtype=np.float32)
     if matrix.shape != (4, 4):
         return matrix
-    return matrix @ _LEFT_STEP_LOCAL_POST_Z_FLIP_4X4
+    local_post_transform = _STEP_LOCAL_POST_Z_FLIP_BY_SIDE.get(side)
+    if local_post_transform is None:
+        return matrix
+    return matrix @ local_post_transform
 
 
 def _ordered_joint_names(
@@ -590,15 +606,15 @@ class RemoteEgoDexWMBackend:
             for joint_name, transform in joint_transforms_world.items()
         }
 
-    def _apply_left_step_local_post_z_flip_joint_transforms_world(
+    def _apply_step_local_post_z_flip_joint_transforms_world(
         self,
         side: str,
         joint_transforms_world: Any,
     ) -> Any:
-        if side != robots.LEFT or joint_transforms_world is None or not isinstance(joint_transforms_world, Mapping):
+        if joint_transforms_world is None or not isinstance(joint_transforms_world, Mapping):
             return joint_transforms_world
         return {
-            str(joint_name): _apply_left_step_local_post_z_flip_transform_array(transform).tolist()
+            str(joint_name): _apply_step_local_post_z_flip_transform_array(side, transform).tolist()
             for joint_name, transform in joint_transforms_world.items()
         }
 
@@ -744,7 +760,7 @@ class RemoteEgoDexWMBackend:
         step_joint_transforms_world = self._flip_joint_transforms_world_z(
             input_payload.get("joint_transforms_world")
         )
-        step_joint_transforms_world = self._apply_left_step_local_post_z_flip_joint_transforms_world(
+        step_joint_transforms_world = self._apply_step_local_post_z_flip_joint_transforms_world(
             side,
             step_joint_transforms_world,
         )
