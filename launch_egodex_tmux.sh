@@ -8,7 +8,7 @@ WM_SCHEME="http"
 HOST="127.0.0.1"
 PORT="18080"
 RESET_POSE_JSONL=""
-VISUALIZE_HANDS_ENABLE=0
+VISUALIZE_HANDS_ENABLE=1
 VISUALIZE_HANDS_BIND_HOST="0.0.0.0"
 VISUALIZE_HANDS_PORT="15102"
 VISUALIZE_HANDS_FPS="15"
@@ -17,10 +17,10 @@ STEP_HAND_SCALING_ENABLE=""
 STEP_HAND_SCALE_MIN=""
 STEP_HAND_SCALE_MAX=""
 WM_HEARTBEAT_HZ=""
-LOCAL_WM_ENABLE=1
-ATTACH=1
-RUN=0
-FRESH=0
+LOCAL_WM_ENABLE=0
+ATTACH=0
+RUN=1
+FRESH=1
 
 usage() {
   cat <<'USAGE'
@@ -29,26 +29,31 @@ Usage: ./launch_egodex_tmux.sh [options]
 Creates a two-pane tmux session for the EgoDex remote WM demo.
 
 Default behavior:
-- creates/reattaches tmux session `egodex_remote_wm`
-- left pane: dummy WM server command prefilled
-- right pane: teleop command prefilled
-- attaches automatically
-- you only need to press Enter in each pane
+- kills any existing tmux session `egodex_remote_wm`
+- launches teleop immediately in a detached tmux session
+- connects to an external WM by default
+- enables teleop hand visualization by default
+- in the common case, you only need to pass `--host` and `--port`
 
 Options:
-  --fresh              Kill any existing session with the same name first.
-  --run                Start both commands immediately instead of prefilling.
-  --detached           Do not attach after creating the session.
+  --fresh              Kill any existing session with the same name first. Default.
+  --run                Start both commands immediately instead of prefilling. Default.
+  --detached           Do not attach after creating the session. Default.
+  --attach             Attach after creating the session.
+  --prefill            Prefill commands instead of starting them immediately.
   --session NAME       Override tmux session name.
   --env NAME           Override conda environment name.
   --wm-scheme SCHEME   WM URL scheme for teleop. Default: http
   --host HOST          WM host passed to both panes. Default: 127.0.0.1
   --port PORT          WM port passed to both panes. Default: 18080
-  --external-wm        Do not launch the local dummy WM server pane.
+  --external-wm        Do not launch the local dummy WM server pane. Default.
+  --local-wm           Launch the local dummy WM server pane.
   --reset-pose-jsonl PATH
                       Seed dummy-server `/reset` from a random JSONL frame.
                       This also enables teleop hand visualization.
-  --visualize-hands   Enable teleop hand visualization without a reset JSONL.
+  --visualize-hands   Enable teleop hand visualization without a reset JSONL. Default.
+  --no-visualize-hands
+                      Disable teleop hand visualization.
   --visualize-hands-bind-host HOST
                       Teleop hand-visualization PUB bind host. Default: 0.0.0.0
   --visualize-hands-port PORT
@@ -83,6 +88,10 @@ while [[ $# -gt 0 ]]; do
       ATTACH=0
       shift
       ;;
+    --attach)
+      ATTACH=1
+      shift
+      ;;
     --session)
       SESSION_NAME="$2"
       shift 2
@@ -107,13 +116,22 @@ while [[ $# -gt 0 ]]; do
       LOCAL_WM_ENABLE=0
       shift
       ;;
+    --local-wm)
+      LOCAL_WM_ENABLE=1
+      shift
+      ;;
     --reset-pose-jsonl)
       RESET_POSE_JSONL="$2"
       VISUALIZE_HANDS_ENABLE=1
+      LOCAL_WM_ENABLE=1
       shift 2
       ;;
     --visualize-hands)
       VISUALIZE_HANDS_ENABLE=1
+      shift
+      ;;
+    --no-visualize-hands)
+      VISUALIZE_HANDS_ENABLE=0
       shift
       ;;
     --visualize-hands-bind-host)
@@ -131,6 +149,7 @@ while [[ $# -gt 0 ]]; do
     --feather-jsonl)
       RESET_POSE_JSONL="$2"
       VISUALIZE_HANDS_ENABLE=1
+      LOCAL_WM_ENABLE=1
       shift 2
       ;;
     --feather-enable)
@@ -148,6 +167,10 @@ while [[ $# -gt 0 ]]; do
     --feather-fps)
       VISUALIZE_HANDS_FPS="$2"
       shift 2
+      ;;
+    --prefill)
+      RUN=0
+      shift
       ;;
     --step-distance-threshold)
       STEP_DISTANCE_THRESHOLD="$2"
